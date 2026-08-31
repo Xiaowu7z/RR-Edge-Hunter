@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import ipaddress
+import base64
+import hashlib
+import os
+import re
 import socket
 import ssl
 import threading
@@ -99,11 +103,11 @@ class _SocketReader:
         return bytes(output)
 
 
-def _socket_address(target_ip: str) -> tuple[int, tuple[object, ...]]:
+def _socket_address(target_ip: str, port: int = 443) -> tuple[int, tuple[object, ...]]:
     address = ipaddress.ip_address(target_ip)
     if address.version == 6:
-        return socket.AF_INET6, (str(address), 443, 0, 0)
-    return socket.AF_INET, (str(address), 443)
+        return socket.AF_INET6, (str(address), port, 0, 0)
+    return socket.AF_INET, (str(address), port)
 
 
 def _read_headers(stream: ssl.SSLSocket, cancel_event: threading.Event, deadline: float) -> tuple[bytes, bytes, float]:
@@ -188,10 +192,11 @@ def _http_get_pinned(
     cancel_event: threading.Event,
     max_body: int,
     hostname: str = SPEED_HOST,
+    port: int = 443,
 ) -> _HttpResult:
     if cancel_event.is_set():
         raise ProbeCancelled("已取消")
-    family, address = _socket_address(target_ip)
+    family, address = _socket_address(target_ip, port)
     connect_started = time.perf_counter()
     absolute_deadline = time.monotonic() + timeout_sec + 10.0
     raw = socket.socket(family, socket.SOCK_STREAM)
@@ -255,10 +260,11 @@ def probe_trace(
     timeout_sec: int = 5,
     cancel_event: threading.Event | None = None,
     hostname: str = SPEED_HOST,
+    port: int = 443,
 ) -> tuple[str, str]:
     cancel = cancel_event or threading.Event()
     try:
-        result = _http_get_pinned(target_ip, "/cdn-cgi/trace", timeout_sec, cancel, 64 * 1024, hostname)
+        result = _http_get_pinned(target_ip, "/cdn-cgi/trace", timeout_sec, cancel, 64 * 1024, hostname, port)
         if not 200 <= result.status <= 399:
             return "", ""
         values: dict[str, str] = {}
@@ -279,6 +285,7 @@ def probe_download(
     cancel_event: threading.Event | None = None,
     log: Callable[[str], None] | None = None,
     hostname: str = SPEED_HOST,
+    port: int = 443,
 ) -> ProbeResult:
     cancel = cancel_event or threading.Event()
     logger = log or (lambda _message: None)
@@ -291,6 +298,7 @@ def probe_download(
             cancel,
             max(int(bytes_target * 1.2), 1_000_000),
             hostname,
+            port,
         )
         downloaded = len(result.body)
         complete = bytes_target <= 0 or downloaded >= int(bytes_target * 0.8)
@@ -308,7 +316,7 @@ def probe_download(
         colo = ""
         loc = ""
         if ok and include_trace and not cancel.is_set():
-            colo, loc = probe_trace(target_ip, timeout_sec, cancel, hostname)
+            colo, loc = probe_trace(target_ip, timeout_sec, cancel, hostname, port)
         return ProbeResult(
             ok=ok,
             error=error,
@@ -339,3 +347,139 @@ def probe_download(
         message = f"{type(exc).__name__}: {str(exc)[:100]}"
         logger(f"{target_ip} 测试失败：{message}")
         return ProbeResult(ok=False, error=message, target_ip=target_ip, bytes_target=bytes_target)
+
+
+def probe_argo_compatibility(
+    target_ip: str,
+    timeout_sec: int = 7,
+    cancel_event: threading.Event | None = None,
+    *,
+    hostname: str,
+    ws_path: str = "",
+    port: int = 443,
+) -> ProbeResult:
+    """Verify that a pinned CF address can serve the user's Argo hostname.
+
+    Throughput remains measured against ``speed.cloudflare.com`` because an
+    ordinary Argo tunnel does not expose Cloudflare's ``/__down`` endpoint.
+    This separate gate keeps certificate verification enabled and, when a WS
+    path is supplied, requires a genuine WebSocket upgrade response.
+    """
+    cancel = cancel_event or threading.Event()
+    target_ip = normalized_ip(target_ip)
+    if ws_path:
+        if (
+            len(ws_path) > 512
+            or not ws_path.startswith("/")
+            or ws_path.startswith("//")
+            or "://" in ws_path
+            or "\\" in ws_path
+            or "#" in ws_path
+            or any(ord(character) < 0x21 or ord(character) > 0x7E for character in ws_path)
+            or re.search(r"%(?![0-9A-Fa-f]{2})", ws_path)
+        ):
+            return ProbeResult(ok=False, error="WS 路径格式无效", target_ip=target_ip, sni=hostname)
+    family, address = _socket_address(target_ip, port)
+    started = time.perf_counter()
+    raw = socket.socket(family, socket.SOCK_STREAM)
+    stream: ssl.SSLSocket | None = None
+    try:
+        if cancel.is_set():
+            raise ProbeCancelled("已取消")
+        raw.settimeout(float(timeout_sec))
+        raw.connect(address)
+        connected = time.perf_counter()
+        context = ssl.create_default_context()
+        stream = context.wrap_socket(raw, server_hostname=hostname, do_handshake_on_connect=False)
+        stream.settimeout(float(timeout_sec))
+        stream.do_handshake()
+        tls_done = time.perf_counter()
+        remote = normalized_ip(stream.getpeername()[0])
+        target_matches = ipaddress.ip_address(target_ip) == ipaddress.ip_address(remote)
+        path = ws_path or "/cdn-cgi/trace"
+        websocket_key = base64.b64encode(os.urandom(16)).decode("ascii")
+        upgrade = ""
+        connection_header = "Connection: close\r\n"
+        if ws_path:
+            upgrade = (
+                "Upgrade: websocket\r\n"
+                "Sec-WebSocket-Version: 13\r\n"
+                f"Sec-WebSocket-Key: {websocket_key}\r\n"
+            )
+            connection_header = "Connection: Upgrade\r\n"
+        request = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {hostname}\r\n"
+            "User-Agent: RR-Edge-Hunter/0.1\r\n"
+            f"{upgrade}"
+            "Accept: */*\r\n"
+            "Accept-Encoding: identity\r\n"
+            f"{connection_header}\r\n"
+        ).encode("ascii")
+        stream.sendall(request)
+        deadline = time.monotonic() + timeout_sec
+        head, initial, first_byte_at = _read_headers(stream, cancel, deadline)
+        status, version, headers = _parse_head(head)
+        colo = ""
+        loc = ""
+        bytes_downloaded = 0
+        if ws_path:
+            expected_accept = base64.b64encode(
+                hashlib.sha1((websocket_key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")).digest()
+            ).decode("ascii")
+            connection_tokens = {token.strip().lower() for token in headers.get("connection", "").split(",")}
+            ok_status = (
+                status == 101
+                and headers.get("upgrade", "").lower() == "websocket"
+                and "upgrade" in connection_tokens
+                and expected_accept == headers.get("sec-websocket-accept", "")
+            )
+            error = "" if ok_status else f"WebSocket 握手未通过（HTTP {status}）"
+        else:
+            body = _read_body(stream, initial, headers, cancel, timeout_sec, deadline, 64 * 1024)
+            bytes_downloaded = len(body)
+            trace_values: dict[str, str] = {}
+            for line in body.decode("utf-8", errors="replace").splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    trace_values[key.strip()] = value.strip()
+            colo = trace_values.get("colo", "").upper()
+            loc = trace_values.get("loc", "").upper()
+            ok_status = 200 <= status <= 399 and bool(colo)
+            error = "" if ok_status else (f"Argo 主机返回 HTTP {status}" if not 200 <= status <= 399 else "未获得 Cloudflare Trace")
+        ok = bool(target_matches and ok_status)
+        if not target_matches:
+            error = f"实际连接地址不一致：{remote}"
+        ended = time.perf_counter()
+        return ProbeResult(
+            ok=ok,
+            error=error,
+            family=family_of(remote) or "未知",
+            target_ip=target_ip,
+            actual_remote_address=remote,
+            target_matches_remote=target_matches,
+            remote_is_ipv6=":" in remote,
+            sni=hostname,
+            cert_verified=True,
+            http_code=status,
+            http_version=version,
+            tcp_ms=(connected - started) * 1000.0,
+            tls_ms=(tls_done - connected) * 1000.0,
+            ttfb_ms=(first_byte_at - started) * 1000.0,
+            total_ms=(ended - started) * 1000.0,
+            bytes_downloaded=bytes_downloaded,
+            colo=colo,
+            loc=loc,
+        )
+    except ProbeCancelled:
+        return ProbeResult(ok=False, error="已取消", target_ip=target_ip, sni=hostname)
+    except (OSError, ValueError, TimeoutError, EOFError, ssl.SSLError) as exc:
+        return ProbeResult(ok=False, error=f"{type(exc).__name__}: {str(exc)[:100]}", target_ip=target_ip, sni=hostname)
+    finally:
+        try:
+            if stream is not None:
+                stream.close()
+            else:
+                raw.close()
+        except OSError:
+            pass

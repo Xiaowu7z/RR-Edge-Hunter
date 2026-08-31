@@ -143,6 +143,7 @@ class FamilyRunResult:
     estimated_traffic_mb: float = 0.0
     elapsed_seconds: float = 0.0
     candidate_count: int = 0
+    compatible_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,6 +155,7 @@ class FamilyRunResult:
             "estimated_traffic_mb": self.estimated_traffic_mb,
             "elapsed_seconds": self.elapsed_seconds,
             "candidate_count": self.candidate_count,
+            "compatible_count": self.compatible_count,
         }
 
 
@@ -170,6 +172,11 @@ class OptimizerResult:
     elapsed_seconds: float
     cancelled: bool = False
     rejected_ip_count: int = 0
+    purpose: str = "dns"
+    node_port: int = 443
+    ws_path: str = ""
+    measurement_host: str = SPEED_HOST
+    measurement_port: int = 443
     version: str = VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -185,5 +192,10 @@ class OptimizerResult:
             "elapsed_seconds": self.elapsed_seconds,
             "cancelled": self.cancelled,
             "rejected_ip_count": self.rejected_ip_count,
+            "purpose": self.purpose,
+            "node_port": self.node_port,
+            "ws_path": self.ws_path,
+            "measurement_host": self.measurement_host,
+            "measurement_port": self.measurement_port,
             "families": [family.to_dict() for family in self.families],
         }

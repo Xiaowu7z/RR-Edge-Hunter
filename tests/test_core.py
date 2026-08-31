@@ -5,8 +5,8 @@ import unittest
 from unittest.mock import patch
 
 from cfopt.models import ASIA_HUNT, BALANCED, ProbeResult
-from cfopt.pipeline import MAX_CANDIDATES_PER_FAMILY, build_snapshot, full_schedule, run_optimizer
-from cfopt.ranges import family_of, is_cloudflare_ip
+from cfopt.pipeline import MAX_CANDIDATES_PER_FAMILY, build_snapshot, full_schedule, normalize_ws_path, run_optimizer
+from cfopt.ranges import family_of, is_cloudflare_ip, sample_official_cloudflare_ips
 
 
 def _probe(ip: str, bytes_target: int, *_args) -> ProbeResult:
@@ -58,7 +58,7 @@ class CoreRulesTest(unittest.TestCase):
         self.assertEqual(rows[0].ip, "104.16.0.2")
         self.assertEqual(next(row for row in rows if row.ip == "104.16.0.1").round_floor_mbps, 0.0)
 
-    def test_asia_ranking_prefers_hkg_before_faster_nrt(self) -> None:
+    def test_asia_ranking_does_not_put_slow_hkg_before_fast_nrt(self) -> None:
         def stable(ip: str, _bytes: int, *_args) -> ProbeResult:
             return ProbeResult(ok=True, target_ip=ip, actual_remote_address=ip, complete_mbps=100.0 if ip.endswith(".2") else 10.0, payload_mbps=10.0, ttfb_ms=10.0)
 
@@ -71,7 +71,98 @@ class CoreRulesTest(unittest.TestCase):
                 probe_fn=stable,
                 trace_fn=lambda ip, *_: ("HKG", "HK") if ip.endswith(".1") else ("NRT", "JP"),
             )
-        self.assertEqual(result.families[0].asia_ranked[0].ip, "104.16.0.1")
+        self.assertEqual(result.families[0].asia_ranked[0].ip, "104.16.0.2")
+
+    def test_official_pool_sample_is_stable_bounded_and_spread(self) -> None:
+        first = sample_official_cloudflare_ips("IPv4", 80)
+        self.assertEqual(first, sample_official_cloudflare_ips("IPv4", 80))
+        self.assertEqual(len(first), 80)
+        self.assertEqual(len(set(first)), 80)
+        self.assertTrue(all(is_cloudflare_ip(ip) and family_of(ip) == "IPv4" for ip in first))
+        self.assertGreater(len({".".join(ip.split(".")[:2]) for ip in first}), 5)
+
+    def test_argo_mode_unions_import_with_official_pool_without_dns_intersection(self) -> None:
+        def compatible(ip: str, *_args) -> ProbeResult:
+            allowed = ip in {"104.16.0.1", "104.16.0.2"}
+            return ProbeResult(
+                ok=allowed,
+                target_ip=ip,
+                actual_remote_address=ip,
+                target_matches_remote=allowed,
+                cert_verified=allowed,
+            )
+
+        with patch("cfopt.pipeline.network_fingerprint", return_value=("", "")):
+            result = run_optimizer(
+                purpose="argo",
+                target_host="argo.example.com",
+                ips=["104.16.0.2", "8.8.8.8"],
+                resolved_ips=["104.16.0.1"],
+                family="ipv4",
+                probe_fn=_probe,
+                trace_fn=lambda *_: ("HKG", "HK"),
+                compatibility_fn=compatible,
+                ws_path="/vless?ed=2048",
+            )
+        rows = result.families[0].ranked
+        self.assertEqual({row.ip for row in rows}, {"104.16.0.1", "104.16.0.2"})
+        by_ip = {row.ip: row for row in rows}
+        self.assertIn("当前 DNS", by_ip["104.16.0.1"].source_tags)
+        self.assertNotIn("我的 IP 名单（官方网段）", by_ip["104.16.0.1"].source_tags)
+        self.assertIn("我的 IP 名单（官方网段）", by_ip["104.16.0.2"].source_tags)
+        self.assertEqual(result.purpose, "argo")
+        self.assertEqual(result.target_host, "argo.example.com")
+        self.assertEqual(result.measurement_host, "speed.cloudflare.com")
+        self.assertEqual(result.measurement_port, 443)
+        self.assertEqual(result.ws_path, "/vless?ed=2048")
+        self.assertGreaterEqual(result.rejected_ip_count, 1)
+
+    def test_argo_measurement_uses_selected_cloudflare_https_port(self) -> None:
+        calls: list[tuple[str, int]] = []
+
+        def download(ip: str, _bytes: int, *_args, hostname: str, port: int, **_kwargs) -> ProbeResult:
+            calls.append((hostname, port))
+            return ProbeResult(
+                ok=True, target_ip=ip, actual_remote_address=ip,
+                target_matches_remote=True, cert_verified=True,
+                complete_mbps=10.0, payload_mbps=10.0, ttfb_ms=10.0,
+            )
+
+        def compatible(ip: str, *_args) -> ProbeResult:
+            return ProbeResult(
+                ok=True, target_ip=ip, actual_remote_address=ip,
+                target_matches_remote=True, cert_verified=True,
+            )
+
+        with (
+            patch("cfopt.pipeline.network_fingerprint", return_value=("", "")),
+            patch("cfopt.pipeline.sample_official_cloudflare_ips", return_value=[]),
+            patch("cfopt.pipeline.probe_download", side_effect=download),
+        ):
+            result = run_optimizer(
+                purpose="argo", target_host="argo.example.com", node_port=8443,
+                resolved_ips=["104.16.0.1"], family="ipv4",
+                compatibility_fn=compatible,
+                trace_fn=lambda *_args, **_kwargs: ("HKG", "HK"),
+            )
+        self.assertEqual(result.measurement_port, 8443)
+        self.assertTrue(calls)
+        self.assertEqual(set(calls), {("speed.cloudflare.com", 8443)})
+
+    def test_argo_domain_must_already_resolve_to_cloudflare(self) -> None:
+        with self.assertRaisesRegex(ValueError, "未返回 Cloudflare"):
+            run_optimizer(
+                purpose="argo",
+                target_host="argo.example.com",
+                resolved_ips=["8.8.8.8"],
+                family="ipv4",
+            )
+
+    def test_ws_path_is_relative_and_header_safe(self) -> None:
+        self.assertEqual(normalize_ws_path("/ws?ed=2048"), "/ws?ed=2048")
+        for value in ("https://example.com/ws", "//example.com/ws", "/ws#fragment", "/ws%zz", "/ws\r\nX: y"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                normalize_ws_path(value)
 
     def test_snapshot_filters_families_and_non_cf(self) -> None:
         snapshot = build_snapshot(["104.16.0.1", "2606:4700::1111", "1.1.1.1"], "IPv4", threading.Event(), lambda *_: None, lambda *_: None)

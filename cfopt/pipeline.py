@@ -15,8 +15,8 @@ from typing import Callable, Iterable
 from .hostnames import HostnameError, normalize_hostname
 from .ip_sources import MAX_SOURCE_BYTES, IpSourceError, decode_ip_source_bytes, normalize_ip_values, parse_ip_source
 from .models import ASIA_HUNT, BALANCED, MODES, FamilyRunResult, IpMetric, ModeParams, OptimizerResult, PopDiscovery, ProbeResult, Snapshot, SPEED_HOST
-from .probe import probe_download, probe_trace
-from .ranges import family_of, is_cloudflare_ip, normalized_ip, prefix_of
+from .probe import probe_argo_compatibility, probe_download, probe_trace
+from .ranges import family_of, is_cloudflare_ip, normalized_ip, prefix_of, sample_official_cloudflare_ips
 from .ranking import address_floor, median_ttfb, rank, rank_asia, stability_label, success_rate, variation
 
 
@@ -24,11 +24,15 @@ StageCallback = Callable[[str, int, int, str], None]
 LogCallback = Callable[[str], None]
 ProbeFunction = Callable[..., ProbeResult]
 TraceFunction = Callable[..., tuple[str, str]]
+CompatibilityFunction = Callable[..., ProbeResult]
 ResolveFunction = Callable[[str], list[str]]
 
 ASIA_POP_ORDER = ("HKG", "NRT", "SIN", "ICN", "TPE")
 POP_PRIORITY = {"HKG": 5, "NRT": 4, "SIN": 3, "ICN": 2, "TPE": 1}
 MAX_CANDIDATES_PER_FAMILY = 128
+PURPOSE_ARGO = "argo"
+PURPOSE_DNS = "dns"
+SUPPORTED_TLS_PORTS = {443, 2053, 2083, 2087, 2096, 8443}
 
 
 class OptimizerCancelled(RuntimeError):
@@ -48,6 +52,25 @@ def _normalize_target_host(value: object) -> str:
         return normalize_hostname(value)
     except HostnameError as exc:
         raise ValueError(f"测试主机无效：{exc}") from exc
+
+
+def normalize_ws_path(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if (
+        len(raw) > 512
+        or not raw.startswith("/")
+        or raw.startswith("//")
+        or "://" in raw
+        or "\\" in raw
+        or "#" in raw
+        or any(raw[index] == "%" and (index + 2 >= len(raw) or any(character not in "0123456789abcdefABCDEF" for character in raw[index + 1:index + 3])) for index in range(len(raw)))
+    ):
+        raise ValueError("WS 路径必须是以 / 开头的相对路径，且不能包含 URL 或片段")
+    if any(ord(character) < 0x21 or ord(character) > 0x7E for character in raw):
+        raise ValueError("WS 路径只能包含可见 ASCII 字符；请先进行 URL 编码")
+    return raw
 
 
 def resolve_target_ips(hostname: str) -> list[str]:
@@ -100,6 +123,44 @@ def _filter_candidates(
     return eligible, rejected, "导入交集"
 
 
+def _build_argo_candidates(
+    candidates: Iterable[str] | None,
+    resolved_ips: Iterable[str],
+    log: LogCallback,
+) -> tuple[list[str], int, str, dict[str, list[str]]]:
+    resolved = list(dict.fromkeys(normalized_ip(value) for value in resolved_ips))
+    cf_resolved = [value for value in resolved if is_cloudflare_ip(value)]
+    if not cf_resolved:
+        raise ValueError("Argo 域名当前 DNS 未返回 Cloudflare 公共边缘地址；请确认域名已启用 Cloudflare 代理")
+
+    official = sample_official_cloudflare_ips("IPv4") + sample_official_cloudflare_ips("IPv6")
+    supplied_cf: list[str] = []
+    rejected = 0
+    if candidates is not None:
+        try:
+            supplied = normalize_ip_values(candidates)
+        except IpSourceError as exc:
+            raise ValueError(str(exc)) from exc
+        supplied_cf = [value for value in supplied if is_cloudflare_ip(value)]
+        rejected = len(supplied) - len(supplied_cf)
+        if rejected:
+            log(f"导入名单中 {rejected} 个非 Cloudflare 官方网段地址已隔离，不会连接")
+
+    merged = list(dict.fromkeys([*cf_resolved, *official, *supplied_cf]))
+    sources: dict[str, list[str]] = {
+        "当前 DNS": cf_resolved,
+        "内置 Cloudflare 官方 CIDR 快照抽样": official,
+    }
+    if candidates is not None:
+        sources["我的 IP 名单（官方网段）"] = supplied_cf
+    label = "智能候选池" if candidates is None else "智能候选池 + 我的 IP 名单"
+    log(
+        f"Argo 智能候选：当前 DNS {len(cf_resolved)} + 内置官方 CIDR 快照抽样 {len(official)}"
+        + (f" + 导入可用 {len(supplied_cf)}" if candidates is not None else "")
+    )
+    return merged, rejected, label, sources
+
+
 def build_snapshot(
     ips: Iterable[str],
     family: str,
@@ -107,6 +168,7 @@ def build_snapshot(
     on_stage: StageCallback,
     log: LogCallback,
     source_tag: str = "当前 DNS",
+    sources: dict[str, list[str]] | None = None,
 ) -> Snapshot:
     normalized: list[str] = []
     seen: set[str] = set()
@@ -123,12 +185,82 @@ def build_snapshot(
             seen.add(value)
             normalized.append(value)
         on_stage(f"候选校验 {family}", index, len(original), value)
+    source_values = sources or {source_tag: original}
+    normalized_set = set(normalized)
+    filtered_sources: dict[str, list[str]] = {}
+    for tag, values in source_values.items():
+        tagged: list[str] = []
+        for raw in values:
+            try:
+                value = normalized_ip(raw)
+            except ValueError:
+                continue
+            if value in normalized_set and family_of(value) == family and value not in tagged:
+                tagged.append(value)
+        filtered_sources[tag] = tagged
     if len(normalized) > MAX_CANDIDATES_PER_FAMILY:
-        log(f"{family} 已验证候选 {len(normalized)} 个；为控制本轮真实下载与亚洲 POP 探测，按 DNS 顺序保留前 {MAX_CANDIDATES_PER_FAMILY} 个")
-        normalized = normalized[:MAX_CANDIDATES_PER_FAMILY]
-    snapshot = Snapshot(family, normalized, {source_tag: normalized})
+        selected = list(dict.fromkeys(filtered_sources.get("当前 DNS", [])))[:MAX_CANDIDATES_PER_FAMILY]
+        seen_selected = set(selected)
+        buckets = [values for tag, values in filtered_sources.items() if tag != "当前 DNS" and values]
+        positions = [0 for _ in buckets]
+        while len(selected) < MAX_CANDIDATES_PER_FAMILY and buckets:
+            progressed = False
+            for bucket_index, bucket in enumerate(buckets):
+                while positions[bucket_index] < len(bucket) and bucket[positions[bucket_index]] in seen_selected:
+                    positions[bucket_index] += 1
+                if positions[bucket_index] < len(bucket):
+                    value = bucket[positions[bucket_index]]
+                    positions[bucket_index] += 1
+                    selected.append(value)
+                    seen_selected.add(value)
+                    progressed = True
+                    if len(selected) >= MAX_CANDIDATES_PER_FAMILY:
+                        break
+            if not progressed:
+                break
+        if len(selected) < MAX_CANDIDATES_PER_FAMILY:
+            selected.extend(value for value in normalized if value not in seen_selected)
+            selected = selected[:MAX_CANDIDATES_PER_FAMILY]
+        log(f"{family} 已验证候选 {len(normalized)} 个；按来源均衡保留 {MAX_CANDIDATES_PER_FAMILY} 个")
+        normalized = selected
+        normalized_set = set(normalized)
+        filtered_sources = {tag: [value for value in values if value in normalized_set] for tag, values in filtered_sources.items()}
+    snapshot = Snapshot(family, normalized, filtered_sources)
     log(f"候选快照({family})：已验证地址 {len(snapshot.ips)}")
     return snapshot
+
+
+def validate_argo_snapshot(
+    snapshot: Snapshot,
+    cancel_event: threading.Event,
+    on_stage: StageCallback,
+    log: LogCallback,
+    compatibility_fn: CompatibilityFunction,
+) -> tuple[Snapshot, int]:
+    stage = f"Argo SNI/Host 兼容验证 {snapshot.family}"
+    on_stage(stage, 0, len(snapshot.ips), "固定候选 IP，保持域名证书校验")
+    passed: list[str] = []
+    if snapshot.ips:
+        with ThreadPoolExecutor(max_workers=12, thread_name_prefix="rr-argo-gate") as pool:
+            futures = {pool.submit(compatibility_fn, ip, 7, cancel_event): ip for ip in snapshot.ips}
+            completed = 0
+            for future in as_completed(futures):
+                _cancelled(cancel_event)
+                ip = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = ProbeResult(ok=False, error=f"{type(exc).__name__}: {exc}", target_ip=ip)
+                if result.ok and result.cert_verified and result.target_matches_remote:
+                    passed.append(ip)
+                completed += 1
+                on_stage(stage, completed, len(snapshot.ips), ip)
+    passed_set = set(passed)
+    ordered = [ip for ip in snapshot.ips if ip in passed_set]
+    rejected = len(snapshot.ips) - len(ordered)
+    log(f"{snapshot.family} Argo 兼容验证：{len(ordered)}/{len(snapshot.ips)} 个候选通过 TLS SNI/Host 与证书校验")
+    sources = {tag: [ip for ip in values if ip in passed_set] for tag, values in snapshot.sources.items()}
+    return Snapshot(snapshot.family, ordered, sources), rejected
 
 
 def full_schedule(ips: list[str], full_rounds: int) -> list[str]:
@@ -239,13 +371,14 @@ def _pre_rank(ips: list[str], cache: dict[str, ProbeResult], pops: dict[str, str
     def key(ip: str) -> tuple[object, ...]:
         result = cache.get(ip, ProbeResult(False, target_ip=ip))
         pop = pop_priority(pops.get(ip, ""))
-        tail: tuple[object, ...] = (
+        performance: tuple[object, ...] = (
             0 if result.ok else 1,
             -result.complete_mbps if result.ok else 0.0,
             result.ttfb_ms if result.ttfb_ms >= 0.0 else float("inf"),
-            ip,
         )
-        return (-pop, *tail) if asia_hunt else tail
+        # Asian POP is a same-performance preference, never a reason to keep a
+        # much slower address ahead of a stable high-throughput candidate.
+        return (*performance, -pop, ip) if asia_hunt else (*performance, ip)
 
     return sorted(ips, key=key)
 
@@ -368,7 +501,15 @@ def run_family(
     check()
     full = _run_full_rounds(final_ranked, params, cancel_event, on_stage, probe_fn, snapshot.family)
     metrics = [
-        _metric(ip, snapshot.family, full.get(ip, []), micro_cache.get(ip), pops, locs, list(snapshot.sources))
+        _metric(
+            ip,
+            snapshot.family,
+            full.get(ip, []),
+            micro_cache.get(ip),
+            pops,
+            locs,
+            [tag for tag, values in snapshot.sources.items() if ip in values],
+        )
         for ip in final_ranked
     ]
     ranked = rank(metrics)
@@ -387,6 +528,7 @@ def run_family(
         estimated_traffic_mb=estimated,
         elapsed_seconds=time.perf_counter() - started,
         candidate_count=len(snapshot.ips),
+        compatible_count=len(snapshot.ips),
     )
 
 
@@ -419,36 +561,73 @@ def run_optimizer(
     resolved_ips: Iterable[str] | None = None,
     probe_fn: ProbeFunction | None = None,
     trace_fn: TraceFunction | None = None,
+    purpose: str = PURPOSE_DNS,
+    node_port: int = 443,
+    ws_path: str = "",
+    compatibility_fn: CompatibilityFunction | None = None,
 ) -> OptimizerResult:
     if mode not in MODES:
         raise ValueError(f"未知模式：{mode}")
     if family not in {"ipv4", "ipv6", "dual"}:
         raise ValueError(f"未知协议族：{family}")
+    if purpose not in {PURPOSE_ARGO, PURPOSE_DNS}:
+        raise ValueError(f"未知用途：{purpose}")
+    if isinstance(node_port, bool) or node_port not in SUPPORTED_TLS_PORTS:
+        raise ValueError("节点端口仅支持 Cloudflare HTTPS 端口：443、2053、2083、2087、2096、8443")
     target = _normalize_target_host(target_host)
+    normalized_ws_path = normalize_ws_path(ws_path)
     cancel = cancel_event or threading.Event()
     stage_callback = on_stage or (lambda _name, _current, _total, _detail: None)
     logger = log or (lambda _message: None)
     supplied = load_ips(ips_path) if ips_path is not None else ips
     current_ips = list(resolved_ips) if resolved_ips is not None else resolver(target)
-    candidates, rejected_count, verified_source = _filter_candidates(supplied, current_ips, logger)
-    actual_source = source_kind if supplied is not None else verified_source
-    if supplied is not None:
-        actual_source = f"{source_kind}（与当前 DNS 交集）"
+    if purpose == PURPOSE_ARGO:
+        candidates, rejected_count, actual_source, candidate_sources = _build_argo_candidates(supplied, current_ips, logger)
+    else:
+        candidates, rejected_count, verified_source = _filter_candidates(supplied, current_ips, logger)
+        actual_source = source_kind if supplied is not None else verified_source
+        if supplied is not None:
+            actual_source = f"{source_kind}（与当前 DNS 交集）"
+        candidate_sources = {actual_source: candidates}
     params = MODES[mode]
     requested = ["IPv4", "IPv6"] if family == "dual" else ["IPv6" if family == "ipv6" else "IPv4"]
     started = time.perf_counter()
     initial_fingerprint = network_fingerprint()
-    worker_probe = probe_fn or functools.partial(probe_download, hostname=target)
-    worker_trace = trace_fn or functools.partial(probe_trace, hostname=target)
+    measurement_host = SPEED_HOST if purpose == PURPOSE_ARGO else target
+    measurement_port = node_port if purpose == PURPOSE_ARGO else 443
+    worker_probe = probe_fn or functools.partial(
+        probe_download, hostname=measurement_host, port=measurement_port
+    )
+    worker_trace = trace_fn or functools.partial(
+        probe_trace, hostname=measurement_host, port=measurement_port
+    )
+    worker_compatibility = compatibility_fn or functools.partial(
+        probe_argo_compatibility,
+        hostname=target,
+        ws_path=normalized_ws_path,
+        port=node_port,
+    )
     family_results: list[FamilyRunResult] = []
     cancelled = False
     try:
         for family_name in requested:
             _cancelled(cancel)
-            snapshot = build_snapshot(candidates, family_name, cancel, stage_callback, logger, actual_source)
+            snapshot = build_snapshot(candidates, family_name, cancel, stage_callback, logger, actual_source, candidate_sources)
             if not snapshot.ips:
-                logger(f"{family_name} 没有当前 DNS 分配的候选地址，已跳过")
+                logger(f"{family_name} 没有可用候选地址，已跳过")
                 continue
+            original_candidate_count = len(snapshot.ips)
+            if purpose == PURPOSE_ARGO:
+                snapshot, compatibility_rejected = validate_argo_snapshot(
+                    snapshot, cancel, stage_callback, logger, worker_compatibility
+                )
+                rejected_count += compatibility_rejected
+                if not snapshot.ips:
+                    logger(f"{family_name} 没有通过 Argo 域名兼容验证的候选地址，已跳过")
+                    family_results.append(
+                        FamilyRunResult(family_name, [], [], candidate_count=original_candidate_count, compatible_count=0)
+                    )
+                    continue
             logger(f"{family_name} 安全预计流量上限 ≈ {estimate_traffic_upper_bound_mb(snapshot, params):.1f} MB")
 
             def changed() -> bool:
@@ -458,7 +637,10 @@ def run_optimizer(
                 return bool(before and after and before != after)
 
             try:
-                family_results.append(run_family(snapshot, params, cancel, stage_callback, logger, changed, worker_probe, worker_trace))
+                family_result = run_family(snapshot, params, cancel, stage_callback, logger, changed, worker_probe, worker_trace)
+                family_result.candidate_count = original_candidate_count
+                family_result.compatible_count = len(snapshot.ips)
+                family_results.append(family_result)
             except NetworkChanged:
                 logger("!! 网络出口已变化，本轮结果作废")
                 family_results.append(FamilyRunResult(family_name, [], [], invalid=True))
@@ -478,6 +660,11 @@ def run_optimizer(
         elapsed_seconds=time.perf_counter() - started,
         cancelled=cancelled,
         rejected_ip_count=rejected_count,
+        purpose=purpose,
+        node_port=node_port,
+        ws_path=normalized_ws_path,
+        measurement_host=measurement_host,
+        measurement_port=measurement_port,
     )
 
 
@@ -490,7 +677,9 @@ __all__ = [
     "full_schedule",
     "load_ips",
     "network_fingerprint",
+    "normalize_ws_path",
     "resolve_target_ips",
     "run_family",
     "run_optimizer",
+    "validate_argo_snapshot",
 ]

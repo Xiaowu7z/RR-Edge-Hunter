@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
+import math
 
 
 FALLBACK_V4 = (
@@ -34,6 +36,12 @@ FALLBACK_V6 = (
 NETWORKS_V4 = tuple(ipaddress.ip_network(item) for item in FALLBACK_V4)
 NETWORKS_V6 = tuple(ipaddress.ip_network(item) for item in FALLBACK_V6)
 
+# Keep the built-in pool bounded.  These are deterministic samples from the
+# published Cloudflare ranges, not an assertion that every sampled address is
+# usable for every zone.  The Argo compatibility pass performs that validation
+# before an address can enter the speed ranking.
+DEFAULT_OFFICIAL_SAMPLE_LIMIT = 112
+
 
 def is_cloudflare_ip(value: str) -> bool:
     try:
@@ -61,3 +69,42 @@ def prefix_of(value: str) -> str:
     prefix = 48 if address.version == 6 else 24
     return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
 
+
+def sample_official_cloudflare_ips(family: str, limit: int = DEFAULT_OFFICIAL_SAMPLE_LIMIT) -> list[str]:
+    """Return a stable, evenly spread sample from Cloudflare's published CIDRs."""
+    if family not in {"IPv4", "IPv6"}:
+        raise ValueError("协议族必须是 IPv4 或 IPv6")
+    if limit <= 0:
+        return []
+    networks = NETWORKS_V4 if family == "IPv4" else NETWORKS_V6
+    per_network = max(1, math.ceil(limit / len(networks)))
+    buckets: list[list[str]] = []
+    for network in networks:
+        if network.version == 4 and network.prefixlen <= 30:
+            start = int(network.network_address) + 1
+            span = max(0, network.num_addresses - 2)
+        else:
+            # Avoid the all-zero subnet-router address while retaining the
+            # entire usable body of very large IPv6 announcements.
+            start = int(network.network_address) + int(network.num_addresses > 1)
+            span = max(0, network.num_addresses - int(network.num_addresses > 1))
+        count = min(per_network, span)
+        offsets: set[int] = set()
+        cursor = 0
+        while len(offsets) < count:
+            digest = hashlib.blake2b(
+                f"rr-edge-hunter:official:{network.with_prefixlen}:{cursor}".encode("ascii"),
+                digest_size=16,
+            ).digest()
+            offsets.add(int.from_bytes(digest, "big") % span)
+            cursor += 1
+        buckets.append([str(ipaddress.ip_address(start + offset)) for offset in sorted(offsets)])
+
+    output: list[str] = []
+    for index in range(per_network):
+        for bucket in buckets:
+            if index < len(bucket):
+                output.append(bucket[index])
+                if len(output) >= limit:
+                    return output
+    return output

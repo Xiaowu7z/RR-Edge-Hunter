@@ -20,7 +20,15 @@ from typing import Any
 from .history import load_history, save_history
 from .ip_sources import IpSourceError, MAX_IPS, MAX_SOURCE_BYTES, fetch_ip_subscription, normalize_ip_values, parse_ip_source
 from .models import MODES, OptimizerResult, SPEED_HOST
-from .pipeline import MAX_CANDIDATES_PER_FAMILY, run_optimizer
+from .pipeline import (
+    MAX_CANDIDATES_PER_FAMILY,
+    PURPOSE_ARGO,
+    PURPOSE_DNS,
+    SUPPORTED_TLS_PORTS,
+    normalize_ws_path,
+    run_optimizer,
+)
+from .hostnames import HostnameError, normalize_hostname
 from .resources import package_root
 from .version import VERSION
 
@@ -58,6 +66,7 @@ class RuntimeState:
         visible = {
             "mode", "family", "operator", "target_host", "source", "source_ip_count",
             "automation_enabled", "automation_interval_minutes", "traffic_upper_bound_mb",
+            "purpose", "node_port", "ws_path",
         }
         return {key: value for key, value in config.items() if key in visible}
 
@@ -122,13 +131,26 @@ class RuntimeState:
 
     def _work(self, config: dict[str, Any]) -> None:
         try:
+            run_config = dict(config)
+            subscription_url = str(run_config.get("_subscription_url", ""))
+            if subscription_url and run_config.get("automation_enabled"):
+                try:
+                    refreshed, final_url = fetch_ip_subscription(subscription_url)
+                    run_config["_ips"] = refreshed.ips
+                    run_config["_subscription_url"] = final_url
+                    self.log(f"定时任务已安全刷新 IP 订阅：{len(refreshed.ips)} 个地址")
+                except IpSourceError as exc:
+                    self.log(f"IP 订阅刷新失败，继续使用上次已载入快照：{exc}")
             result = run_optimizer(
-                mode=str(config.get("mode", "balanced")),
-                family=str(config.get("family", "dual")),
-                operator=str(config.get("operator", "自动")),
-                target_host=str(config.get("target_host", SPEED_HOST)),
-                ips=config.get("_ips"),
-                source_kind=str(config.get("source", "当前 DNS")),
+                mode=str(run_config.get("mode", "balanced")),
+                family=str(run_config.get("family", "dual")),
+                operator=str(run_config.get("operator", "自动")),
+                target_host=str(run_config.get("target_host", SPEED_HOST)),
+                ips=run_config.get("_ips"),
+                source_kind=str(run_config.get("source", "当前 DNS")),
+                purpose=str(run_config.get("purpose", PURPOSE_DNS)),
+                node_port=int(run_config.get("node_port", 443)),
+                ws_path=str(run_config.get("ws_path", "")),
                 cancel_event=self.cancel_event,
                 on_stage=self.on_stage,
                 log=self.log,
@@ -222,17 +244,20 @@ class RuntimeState:
 
 
 def _csv_bytes(result: OptimizerResult) -> bytes:
+    argo = result.purpose == PURPOSE_ARGO
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow([
-        "family", "rank", "ip", "round_floor_mbps", "avg_complete_mbps", "min_complete_mbps",
+        "family", "rank", "ip", "server", "port", "sni", "host", "ws_path", "round_floor_mbps", "avg_complete_mbps", "min_complete_mbps",
         "success_rate_pct", "variation_pct", "median_ttfb_ms", "pop", "loc", "rounds_tested", "source_tags",
     ])
     for family in result.families:
         rows = family.asia_ranked if result.mode == "asia" else family.ranked
         for index, item in enumerate(rows, 1):
             writer.writerow([
-                family.family, index, item.ip, f"{item.round_floor_mbps:.3f}", f"{item.avg_complete_mbps:.3f}",
+                family.family, index, item.ip, item.ip if argo else "", result.node_port if argo else "",
+                result.target_host if argo else "", result.target_host if argo else "", result.ws_path if argo else "",
+                f"{item.round_floor_mbps:.3f}", f"{item.avg_complete_mbps:.3f}",
                 f"{item.min_complete_mbps:.3f}", f"{item.success_rate_pct:.1f}", f"{item.variation_pct:.1f}",
                 f"{item.median_ttfb_ms:.1f}", item.pop, item.loc, item.rounds_tested, " | ".join(item.source_tags),
             ])
@@ -312,7 +337,30 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
             mode = str(body.get("mode", "balanced"))
             family = str(body.get("family", "dual"))
             operator = str(body.get("operator", "自动"))[:30]
-            target_host = str(body.get("target_host", SPEED_HOST))[:255]
+            purpose = str(body.get("purpose", PURPOSE_ARGO))
+            if purpose not in {PURPOSE_ARGO, PURPOSE_DNS}:
+                raise IpSourceError("用途参数无效")
+            raw_target = str(body.get("target_host", "" if purpose == PURPOSE_ARGO else SPEED_HOST)).strip()[:255]
+            if any(marker in raw_target for marker in ("://", "/", "?", "#", "@")) or ":" in raw_target:
+                raise IpSourceError("请只填写域名，不要填写 IP、URL、端口或路径")
+            try:
+                target_host = normalize_hostname(raw_target)
+            except HostnameError as exc:
+                label = "Argo 节点域名" if purpose == PURPOSE_ARGO else "测试主机"
+                raise IpSourceError(f"{label}无效：{exc}") from exc
+            raw_port = body.get("node_port", 443)
+            if isinstance(raw_port, bool):
+                raise IpSourceError("节点端口无效")
+            try:
+                node_port = int(raw_port)
+            except (TypeError, ValueError) as exc:
+                raise IpSourceError("节点端口无效") from exc
+            if node_port not in SUPPORTED_TLS_PORTS:
+                raise IpSourceError("节点端口仅支持 443、2053、2083、2087、2096、8443")
+            try:
+                ws_path = normalize_ws_path(body.get("ws_path", ""))
+            except ValueError as exc:
+                raise IpSourceError(str(exc)) from exc
             source = "custom" if body.get("source") == "custom" else "dns"
             if mode not in MODES or family not in {"ipv4", "ipv6", "dual"}:
                 raise IpSourceError("参数无效")
@@ -321,7 +369,15 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 "family": family,
                 "operator": operator,
                 "target_host": target_host,
-                "source": "我的 IP 名单" if source == "custom" else "当前 DNS",
+                "source": (
+                    "智能候选池 + 我的 IP 名单" if source == "custom" and purpose == PURPOSE_ARGO
+                    else "智能候选池" if purpose == PURPOSE_ARGO
+                    else "我的 IP 名单" if source == "custom"
+                    else "当前 DNS"
+                ),
+                "purpose": purpose,
+                "node_port": node_port,
+                "ws_path": ws_path,
                 "traffic_upper_bound_mb": _traffic_upper_bound_mb(mode, family),
             }
             if source == "custom":
@@ -331,6 +387,25 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 custom_ips = normalize_ip_values(values)
                 config["_ips"] = custom_ips
                 config["source_ip_count"] = len(custom_ips)
+                subscription_url = str(body.get("subscription_url", "")).strip()
+                if subscription_url:
+                    if len(subscription_url) > 2_048:
+                        raise IpSourceError("订阅链接过长")
+                    parsed_subscription = urllib.parse.urlsplit(subscription_url)
+                    try:
+                        subscription_port = parsed_subscription.port
+                    except ValueError as exc:
+                        raise IpSourceError("订阅链接端口无效") from exc
+                    if (
+                        parsed_subscription.scheme.lower() != "https"
+                        or not parsed_subscription.hostname
+                        or parsed_subscription.username
+                        or parsed_subscription.password
+                        or subscription_port not in {None, 443}
+                        or parsed_subscription.fragment
+                    ):
+                        raise IpSourceError("订阅链接只支持 HTTPS")
+                    config["_subscription_url"] = subscription_url
             return config
 
         @staticmethod
@@ -355,7 +430,11 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 self._json({
                     "version": VERSION,
                     "request_token": request_token,
-                    "default_target_host": SPEED_HOST,
+                    "default_purpose": PURPOSE_ARGO,
+                    "default_target_host": "",
+                    "diagnostic_default_target_host": SPEED_HOST,
+                    "default_node_port": 443,
+                    "supported_tls_ports": sorted(SUPPORTED_TLS_PORTS),
                     "max_custom_ips": MAX_IPS,
                     "max_source_bytes": MAX_SOURCE_BYTES,
                     "candidate_cap_per_family": MAX_CANDIDATES_PER_FAMILY,

@@ -20,28 +20,35 @@ def _parser() -> argparse.ArgumentParser:
     ui.add_argument("--port", type=int, default=0)
     ui.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
 
-    run = sub.add_parser("run", help="在命令行执行已分配 Cloudflare IP 的本机测量")
+    run = sub.add_parser("run", help="在命令行执行 Argo 优选或当前 DNS 体检")
+    run.add_argument("--purpose", choices=("argo", "dns"), default="dns", help="argo=节点入口优选；dns=当前 DNS 快速体检")
     run.add_argument("--mode", choices=("balanced", "asia"), default="balanced")
     run.add_argument("--family", choices=("ipv4", "ipv6", "dual"), default="dual")
     run.add_argument("--operator", default="自动", help="仅作为当前线路标签记录")
-    run.add_argument("--target-host", default=SPEED_HOST, help="获授权的 Cloudflare 测试主机；只测其当前 DNS 分配地址")
-    run.add_argument("--ips", type=Path, help="可选 IP 筛选名单；仅保留与当前 DNS 分配结果相交的地址")
+    run.add_argument("--target-host", default=SPEED_HOST, help="Argo 节点域名，或 DNS 体检的获授权主机")
+    run.add_argument("--node-port", type=int, default=443, help="Argo 节点 TLS 端口")
+    run.add_argument("--ws-path", default="", help="可选 WebSocket 路径，例如 /vless")
+    run.add_argument("--ips", type=Path, help="可选 IP 名单；Argo 模式作为智能池补充，DNS 模式用于交集筛选")
     run.add_argument("--output", type=Path, default=Path("rr-edge-hunter-result.json"))
     run.add_argument("--csv", type=Path, help="额外导出 CSV")
     return parser
 
 
 def _write_csv(path: Path, result: dict[str, object]) -> None:
+    argo = result.get("purpose") == "argo"
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(["family", "rank", "ip", "round_floor_mbps", "avg_mbps", "success_pct", "variation_pct", "pop", "loc", "rounds"])
+        writer.writerow(["family", "rank", "ip", "server", "port", "sni", "host", "ws_path", "round_floor_mbps", "avg_mbps", "success_pct", "variation_pct", "pop", "loc", "rounds"])
         for family in result.get("families", []):
             if not isinstance(family, dict):
                 continue
             rows = family.get("asia_ranked" if result.get("mode") == "asia" else "ranked", [])
             for index, row in enumerate(rows, 1):
                 writer.writerow([
-                    family.get("family", ""), index, row.get("ip", ""), row.get("round_floor_mbps", 0),
+                    family.get("family", ""), index, row.get("ip", ""), row.get("ip", "") if argo else "",
+                    result.get("node_port", 443) if argo else "", result.get("target_host", "") if argo else "",
+                    result.get("target_host", "") if argo else "", result.get("ws_path", "") if argo else "",
+                    row.get("round_floor_mbps", 0),
                     row.get("avg_complete_mbps", 0), row.get("success_rate_pct", 0), row.get("variation_pct", 0),
                     row.get("pop", ""), row.get("loc", ""), row.get("rounds_tested", 0),
                 ])
@@ -66,6 +73,9 @@ def _run_command(args: argparse.Namespace) -> int:
             target_host=args.target_host,
             ips_path=args.ips,
             source_kind="命令行 IP 名单" if args.ips else "当前 DNS",
+            purpose=args.purpose,
+            node_port=args.node_port,
+            ws_path=args.ws_path,
             cancel_event=cancel_event,
             on_stage=stage,
             log=log,

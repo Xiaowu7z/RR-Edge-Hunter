@@ -19,9 +19,9 @@
     <section class="hero">
       <div class="hero-copy">
         <p class="eyebrow">RR FAMILY · ASIAN HUNTING</p>
-        <h1><span class="hero-primary">在当前网络下，</span><br><span class="hero-accent">验证真实分配的 Cloudflare IP。</span></h1>
-        <p class="hero-lead">先校验测试主机当前 DNS 分配，再以固定 SNI、证书校验、Pre / Micro / Full 多轮下载，筛选更稳定的边缘地址。结果仅代表本机、当前网络与本轮状态。</p>
-        <div class="hero-pills"><span>IPv4 / IPv6</span><span>三网线路标签</span><span>亚洲狩猎</span><span>POP 漂移复核</span></div>
+        <h1><span class="hero-primary">一键找出可以填进</span><br><span class="hero-accent">Argo 节点的优选 IP。</span></h1>
+        <p class="hero-lead">地址 / server 使用优选 IP，原 Argo 域名继续作为 TLS SNI 与 HTTP Host。先验证域名证书和可用性，再用 Cloudflare 公共测速端点做 Pre / Micro / Full 多轮下载。</p>
+        <div class="hero-pills"><span>直接填节点地址</span><span>SNI / Host 不变</span><span>IPv4 / IPv6</span><span>亚洲狩猎</span></div>
       </div>
       <div class="signal-card" aria-hidden="true">
         <div class="signal-head"><span>LIVE EDGE DIAGNOSTIC</span><span class="signal-live">READY</span></div>
@@ -36,8 +36,23 @@
       <form id="optimizerForm" class="panel control-panel">
         <div class="panel-heading"><div><p class="section-kicker">RUN CONFIGURATION</p><h2>开始一轮优选</h2></div><span id="poolCount" class="count-chip">读取本机配置…</span></div>
 
+        <fieldset class="primary-setup">
+          <legend><span>01</span><b>我要优选</b></legend>
+          <div class="segment-control purpose-control"><label><input type="radio" name="purpose" value="argo" checked><span>Argo 节点优选 IP</span></label><label><input type="radio" name="purpose" value="dns"><span>当前 DNS 快速体检</span></label></div>
+          <label id="targetHostLabel" class="field-label" for="targetHost">Argo 节点域名（TLS SNI / HTTP Host）</label>
+          <input id="targetHost" name="targetHost" type="text" placeholder="argo.example.com" spellcheck="false" autocomplete="off">
+          <div id="argoFields" class="node-fields">
+            <label><span>节点端口</span><select id="nodePort"><option selected>443</option><option>2053</option><option>2083</option><option>2087</option><option>2096</option><option>8443</option></select></label>
+            <label><span>WebSocket 路径（可选）</span><input id="wsPath" type="text" placeholder="例如 /vless；留空则验证 CF Trace" spellcheck="false" autocomplete="off"></label>
+          </div>
+          <p id="purposeHint" class="field-note">结果中的 IP 直接填入节点 address / server；域名、端口和 WS 路径保持原配置。</p>
+        </fieldset>
+
+        <details id="advancedSettings" class="advanced-settings">
+          <summary><span><b>高级设置</b><small>IPv4 / IPv6、运营商标签、亚洲狩猎、候选池和自动运行</small></span><i>⌄</i></summary>
+
         <fieldset>
-          <legend><span>01</span><b>当前线路标签</b></legend>
+          <legend><span>02</span><b>当前线路标签</b></legend>
           <div class="operator-grid">
             <label><input type="radio" name="operator" value="自动" checked><span>自动</span></label>
             <label><input type="radio" name="operator" value="中国移动"><span>移动</span></label>
@@ -48,12 +63,12 @@
         </fieldset>
 
         <fieldset>
-          <legend><span>02</span><b>协议栈</b></legend>
+          <legend><span>03</span><b>协议栈</b></legend>
           <div class="segment-control"><label><input type="radio" name="family" value="ipv4"><span>IPv4</span></label><label><input type="radio" name="family" value="ipv6"><span>IPv6</span></label><label><input type="radio" name="family" value="dual" checked><span>双栈</span></label></div>
         </fieldset>
 
         <fieldset>
-          <legend><span>03</span><b>测速策略</b></legend>
+          <legend><span>04</span><b>测速策略</b></legend>
           <div class="mode-grid">
             <label class="mode-card"><input type="radio" name="mode" value="balanced" checked><span class="mode-content"><i class="mode-icon mode-balanced">≈</i><strong>均衡模式 <em>推荐</em></strong><small>80 个进入 Micro，20 个进行两轮完整复核。</small></span></label>
             <label class="mode-card"><input type="radio" name="mode" value="asia"><span class="mode-content"><i class="mode-icon mode-asia">⌁</i><strong>亚洲狩猎</strong><small>优先 HKG、NRT、SIN，扩大候选并做三轮 POP 漂移复核。</small></span></label>
@@ -61,21 +76,14 @@
         </fieldset>
 
         <fieldset>
-          <legend><span>04</span><b>已授权测试主机</b></legend>
-          <label class="field-label" for="targetHost">HTTPS 主机名（必须是你有权测试的 Cloudflare 主机）</label>
-          <input id="targetHost" name="targetHost" type="text" value="speed.cloudflare.com" spellcheck="false" autocomplete="off">
-          <p class="field-note">只会测试该主机当前 DNS 实际分配的 Cloudflare IP；不将流量强制导向未分配地址。</p>
-        </fieldset>
-
-        <fieldset>
           <legend><span>05</span><b>候选来源</b></legend>
-          <div class="segment-control source-control"><label><input type="radio" name="ipSource" value="dns" checked><span>当前 DNS</span></label><label><input type="radio" name="ipSource" value="custom"><span>我的 IP 名单</span></label></div>
+          <div class="segment-control source-control"><label><input type="radio" name="ipSource" value="dns" checked><span id="builtInSourceLabel">智能候选池</span></label><label><input type="radio" name="ipSource" value="custom"><span id="customSourceLabel">加入我的 IP 名单</span></label></div>
           <div id="customSourcePanel" class="custom-source" hidden>
             <label class="field-label" for="ipInput">粘贴 IP / IP:443 / CIDR</label>
             <textarea id="ipInput" rows="5" spellcheck="false" placeholder="104.16.0.1&#10;[2606:4700:4700::1111]:443&#10;104.16.0.0/24"></textarea>
             <div class="import-actions"><button id="parseIpsButton" class="mini-button" type="button">识别输入</button><button id="chooseIpFile" class="mini-button" type="button">导入文件</button><input id="ipFile" type="file" accept=".txt,.list,.csv,.tsv,.json,.conf,text/plain,text/csv,application/json" hidden></div>
             <div class="subscription-row"><input id="subscriptionUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://example.com/ip-set.txt"><button id="fetchSubscriptionButton" class="mini-button" type="button">读取 HTTPS 链接</button></div>
-            <p id="ipSourceStatus" class="source-status">支持 TXT、CSV、TSV、JSON、Base64、长粘贴和 CIDR；导入后仅保留与当前 DNS 分配结果一致的 IP。</p>
+            <p id="ipSourceStatus" class="source-status">支持 TXT、CSV、TSV、JSON、Base64、长粘贴和 CIDR；仅 Cloudflare 官方网段会进入默认候选池。</p>
           </div>
           <p class="traffic-note"><b>流量提醒</b>：Pre、Micro、Full 均为真实 HTTPS 下载。亚洲狩猎与双栈会消耗更多时间和流量。</p>
         </fieldset>
@@ -88,8 +96,9 @@
             <div class="interval-row"><input id="automationInterval" type="number" min="5" max="1440" step="1" value="30" inputmode="numeric"><span>分钟</span></div>
             <p id="automationForecast" class="traffic-note" hidden></p>
           </div>
-          <p class="field-note">每轮仍只测测试主机当前 DNS 实际分配的地址；不会自动改写 A、AAAA 或其他 DNS 记录。</p>
+          <p class="field-note">粘贴/文件使用本次快照；HTTPS 订阅每轮安全刷新，失败时回退上次快照。结果只供复制 / 导出，不会改写 DNS 或节点文件。</p>
         </fieldset>
+        </details>
 
         <div class="action-row"><button id="startButton" class="primary-button" type="submit"><span id="startButtonLabel">开始本机优选</span><b>→</b></button><button id="stopButton" class="stop-button" type="button" disabled>停止</button></div>
       </form>
@@ -98,19 +107,19 @@
         <div class="panel-heading monitor-heading"><div><p class="section-kicker">MEASUREMENT CONSOLE</p><h2>实时状态</h2></div><span id="statusBadge" class="status-badge idle"><i></i><b>待命</b></span></div>
         <div class="stage-card"><div class="stage-copy"><span id="stageName">等待开始</span><strong id="stageCounter">0 / 0</strong></div><progress id="stageProgress" max="100" value="0">0%</progress><p id="stageDetail">选择参数后开始。测试结果不会上传。</p></div>
         <p id="automationStatus" class="automation-status">定时自动优选未开启</p>
-        <div class="metric-strip"><div><small>探测方式</small><strong>固定 IP + SNI</strong></div><div><small>连接模型</small><strong>HTTP/1.1 冷连接</strong></div><div><small>完整性</small><strong>≥ 80%</strong></div></div>
+        <div class="metric-strip"><div><small id="metricPrimaryLabel">节点输出</small><strong id="metricPrimaryValue">IP → address / server</strong></div><div><small id="metricIdentityLabel">身份验证</small><strong id="metricIdentityValue">原域名 SNI + Host</strong></div><div><small>证书</small><strong>始终严格校验</strong></div></div>
         <div class="console-wrap"><div class="console-top"><span><i></i><i></i><i></i></span><b>rr-edge-hunter.log</b></div><pre id="logOutput">等待测速任务…</pre></div><div id="errorBox" class="error-box" hidden></div>
       </section>
     </section>
 
     <section id="resultSection" class="results-section" hidden>
-      <div class="results-heading"><div><p class="section-kicker">FINAL ROUND FLOOR RANKING</p><h2>本轮结果</h2><p>排名首先比较同一 IP 多轮 Full 测试中的最低成绩；任一完整复核失败，底线即为 0。</p></div><div class="result-actions"><a class="ghost-button" href="/api/export?format=csv">导出 CSV</a><a class="ghost-button" href="/api/export?format=json">导出 JSON</a></div></div>
+      <div class="results-heading"><div><p id="resultKicker" class="section-kicker">ARGO SERVER / ADDRESS RANKING</p><h2 id="resultTitle">可直接用于节点的结果</h2><p id="resultDescription">只替换节点 address / server；TLS SNI、HTTP Host、端口与 WS 路径保持页面所示配置。</p></div><div class="result-actions"><a class="ghost-button" href="/api/export?format=csv">导出 CSV</a><a class="ghost-button" href="/api/export?format=json">导出 JSON</a></div></div>
       <div id="familyTabs" class="family-tabs"></div><article id="winnerCard" class="winner-card"></article>
       <div class="table-shell"><table><thead><tr><th>排名 / IP</th><th>复核底线</th><th>平均速度</th><th>成功率</th><th>波动</th><th>POP</th><th>来源</th></tr></thead><tbody id="resultRows"></tbody></table></div>
       <p class="result-footnote">结果只代表本轮、当前网络与当前出口。更换 Wi‑Fi、运营商、VPN 或出口后请重新测试。</p>
     </section>
 
-    <section class="method-grid"><article><span>01</span><h3>验证已分配地址</h3><p>候选必须来自测试主机当前 DNS；自定义 IP 仅作为本地筛选名单，不能绕过这一校验。</p></article><article><span>02</span><h3>三层真实下载</h3><p>Pre 快速淘汰，Micro 小流量复核，Full 对入围 IP 固定多轮下载。</p></article><article><span>03</span><h3>最低轮次优先</h3><p>失败按 0 计，先比较复核底线，再比较成功率、最低速度、平均速度、波动与 TTFB。</p></article></section>
+    <section class="method-grid"><article><span>01</span><h3>Argo 域名兼容门禁</h3><p>固定连接每个候选 IP，同时严格使用用户域名验证 TLS 证书、SNI、Host 与可选 WS 握手。</p></article><article><span>02</span><h3>官方池分层测速</h3><p>当前 DNS、内置 Cloudflare 官方 CIDR 快照受控抽样与用户导入官方网段组成候选，吞吐由公共测速端点完成。</p></article><article><span>03</span><h3>稳定速度优先</h3><p>失败按 0 计，先看复核底线和成功率；亚洲 POP 只在性能接近时作为偏好，不会压过巨大速度差。</p></article></section>
     <aside class="legal-note"><span>使用边界 · 非官方独立工具</span><p>本工具仅用于在自有或获授权的网络与主机上进行本地边缘连通性诊断，不提供端口扫描、漏洞探测、压力测试、代理服务或绕过访问控制能力。Cloudflare 等名称与商标归其权利人所有，本工具与相关服务商不存在隶属、合作、赞助或背书关系。</p></aside>
   </main>
   <footer><span>RR Edge Hunter · Local only</span><span>数据保存在本机，不上传测速结果</span></footer><div id="toast" class="toast" role="status" aria-live="polite"></div>

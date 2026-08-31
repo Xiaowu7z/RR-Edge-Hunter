@@ -15,6 +15,9 @@ const resultSection = $("#resultSection");
 const familyTabs = $("#familyTabs");
 const winnerCard = $("#winnerCard");
 const resultRows = $("#resultRows");
+const resultKicker = $("#resultKicker");
+const resultTitle = $("#resultTitle");
+const resultDescription = $("#resultDescription");
 const toast = $("#toast");
 const customSourcePanel = $("#customSourcePanel");
 const ipInput = $("#ipInput");
@@ -22,17 +25,31 @@ const ipFile = $("#ipFile");
 const ipSourceStatus = $("#ipSourceStatus");
 const poolCount = $("#poolCount");
 const targetHost = $("#targetHost");
+const targetHostLabel = $("#targetHostLabel");
+const purposeHint = $("#purposeHint");
+const argoFields = $("#argoFields");
+const nodePort = $("#nodePort");
+const wsPath = $("#wsPath");
+const builtInSourceLabel = $("#builtInSourceLabel");
+const customSourceLabel = $("#customSourceLabel");
 const automationEnabled = $("#automationEnabled");
 const automationInterval = $("#automationInterval");
 const automationStatus = $("#automationStatus");
 const automationForecast = $("#automationForecast");
 const startButtonLabel = $("#startButtonLabel");
+const metricPrimaryLabel = $("#metricPrimaryLabel");
+const metricPrimaryValue = $("#metricPrimaryValue");
+const metricIdentityLabel = $("#metricIdentityLabel");
+const metricIdentityValue = $("#metricIdentityValue");
 
 let requestToken = "";
 let customIps = [];
+let loadedSubscriptionUrl = "";
 let activeFamily = "";
 let lastStatus = null;
 let pollTimer = null;
+let lastPurpose = "argo";
+const targetValues = { argo: "", dns: "speed.cloudflare.com" };
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
@@ -69,11 +86,38 @@ function sourceIsCustom() {
   return currentValue("ipSource") === "custom";
 }
 
+function currentPurpose() {
+  return currentValue("purpose") || "argo";
+}
+
+function updatePurpose() {
+  const purpose = currentPurpose();
+  targetValues[lastPurpose] = targetHost.value.trim();
+  targetHost.value = targetValues[purpose] || (purpose === "dns" ? (window.rrConfig?.diagnostic_default_target_host || "speed.cloudflare.com") : "");
+  lastPurpose = purpose;
+  const argo = purpose === "argo";
+  argoFields.hidden = !argo;
+  targetHostLabel.textContent = argo ? "Argo 节点域名（TLS SNI / HTTP Host）" : "获授权的 Cloudflare 测试主机";
+  targetHost.placeholder = argo ? "argo.example.com" : "speed.cloudflare.com";
+  purposeHint.textContent = argo
+    ? "结果中的 IP 直接填入节点 address / server；域名、端口和 WS 路径保持原配置。"
+    : "辅助模式只检查目标主机当前 DNS 分配的 Cloudflare 地址。";
+  builtInSourceLabel.textContent = argo ? "智能候选池" : "当前 DNS";
+  customSourceLabel.textContent = argo ? "加入我的 IP 名单" : "DNS 交集筛选";
+  metricPrimaryLabel.textContent = argo ? "节点输出" : "候选范围";
+  metricPrimaryValue.textContent = argo ? "IP → address / server" : "仅当前 DNS 地址";
+  metricIdentityLabel.textContent = argo ? "身份验证" : "诊断主机";
+  metricIdentityValue.textContent = argo ? "原域名 SNI + Host" : "固定 SNI + Host";
+  updateSourcePanel();
+}
+
 function updateSourcePanel() {
   customSourcePanel.hidden = !sourceIsCustom();
   if (!sourceIsCustom()) {
     customIps = [];
-    setCustomStatus("使用测试主机当前 DNS 实际分配的 Cloudflare IP。", "ready");
+    setCustomStatus(currentPurpose() === "argo"
+      ? "使用当前 DNS + Cloudflare 内置官方 CIDR 快照受控抽样。"
+      : "使用测试主机当前 DNS 实际分配的 Cloudflare IP。", "ready");
   }
 }
 
@@ -182,10 +226,31 @@ function familyRows(result, familyName) {
   return result.mode === "asia" ? (family.asia_ranked || []) : (family.ranked || []);
 }
 
+function argoSummary(result, ip) {
+  const lines = [
+    `地址/server=${ip}`,
+    `端口=${Number(result.node_port || 443)}`,
+    `TLS SNI=${result.target_host || ""}`,
+    `HTTP Host=${result.target_host || ""}`,
+  ];
+  lines.push(`WS 路径=${result.ws_path || "保持原节点配置"}`);
+  return lines.join("\n");
+}
+
+async function copyText(value, successMessage) {
+  try { await navigator.clipboard.writeText(value); showToast(successMessage); } catch { showToast("复制失败，请手动复制"); }
+}
+
 function renderResult(result) {
   const families = result.families || [];
   if (!families.length) return;
   resultSection.hidden = false;
+  const argoResult = result.purpose === "argo";
+  resultKicker.textContent = argoResult ? "ARGO SERVER / ADDRESS RANKING" : "CURRENT DNS DIAGNOSTIC";
+  resultTitle.textContent = argoResult ? "可直接用于节点的结果" : "当前 DNS 入口体检结果";
+  resultDescription.textContent = argoResult
+    ? "只替换节点 address / server；TLS SNI、HTTP Host、端口与 WS 路径保持页面所示配置。"
+    : "辅助体检只比较目标主机当前 DNS 返回的 Cloudflare 地址，不输出 Argo 节点参数。";
   if (!families.some((item) => item.family === activeFamily)) activeFamily = families[0].family;
   familyTabs.innerHTML = "";
   for (const family of families) {
@@ -203,18 +268,20 @@ function renderResult(result) {
     resultRows.innerHTML = "";
     return;
   }
+  const winnerSummaryButton = argoResult ? "<button type=\"button\" class=\"mini-button\" data-winner-summary>复制 Argo 参数</button>" : "";
   winnerCard.innerHTML = `
-    <div class="winner-domain"><small>TOP 01 · ${escapeHtml(activeFamily)}</small><h3>${escapeHtml(winner.ip)}</h3><p>${escapeHtml(winner.pop || "POP 未知")} · ${escapeHtml(winner.stability || "待评估")} · ${Number(winner.rounds_tested || 0)} 轮完整复核</p></div>
+    <div class="winner-domain"><small>TOP 01 · ${escapeHtml(activeFamily)}</small><h3>${escapeHtml(winner.ip)}</h3><p>${escapeHtml(winner.pop || "POP 未知")} · ${escapeHtml(winner.stability || "待评估")} · ${Number(winner.rounds_tested || 0)} 轮完整复核</p><div class="winner-actions"><button type="button" class="mini-button" data-winner-ip>复制 IP</button>${winnerSummaryButton}</div></div>
     <div class="winner-stat"><small>复核底线</small><strong>${formatMbps(winner.round_floor_mbps)}</strong><em>任一失败即为 0</em></div>
     <div class="winner-stat"><small>平均速度</small><strong>${formatMbps(winner.avg_complete_mbps)}</strong><em>TTFB ${winner.median_ttfb_ms >= 0 ? `${Number(winner.median_ttfb_ms).toFixed(0)} ms` : "—"}</em></div>
     <div class="winner-stat"><small>成功率</small><strong>${Number(winner.success_rate_pct || 0).toFixed(1)}%</strong><em>波动 ${Number(winner.variation_pct || 0).toFixed(1)}%</em></div>`;
   resultRows.innerHTML = rows.map((row, index) => `
-    <tr><td><div class="rank-domain"><span class="rank-number">${index + 1}</span><div><strong>${escapeHtml(row.ip)}</strong><small>${escapeHtml(row.family)} · ${Number(row.rounds_tested || 0)} 轮</small><div class="row-actions"><button class="copy-button" data-copy="${escapeHtml(row.ip)}">复制 IP</button></div></div></div></td>
+    <tr><td><div class="rank-domain"><span class="rank-number">${index + 1}</span><div><strong>${escapeHtml(row.ip)}</strong><small>${escapeHtml(row.family)} · ${Number(row.rounds_tested || 0)} 轮</small><div class="row-actions"><button type="button" class="copy-button" data-copy-ip="${escapeHtml(row.ip)}">复制 IP</button>${argoResult ? `<button type="button" class="copy-button" data-copy-summary="${escapeHtml(row.ip)}">复制参数</button>` : ""}</div></div></div></td>
     <td class="speed-cell"><strong>${formatMbps(row.round_floor_mbps)}</strong><small>最低轮次</small></td><td class="speed-cell"><strong>${formatMbps(row.avg_complete_mbps)}</strong><small>最高 ${formatMbps(row.max_complete_mbps)}</small></td>
     <td><span class="quality-pill">${Number(row.success_rate_pct || 0).toFixed(1)}%</span></td><td>${Number(row.variation_pct || 0).toFixed(1)}%</td><td><span class="pop-pill">${escapeHtml(row.pop || "UNKNOWN")}</span><br><small>${escapeHtml(row.loc || "")}</small></td><td class="address-cell">${escapeHtml((row.source_tags || []).join(" / ") || "当前 DNS")}</td></tr>`).join("");
-  resultRows.querySelectorAll("[data-copy]").forEach((button) => button.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(button.dataset.copy || ""); showToast("已复制 IP"); } catch { showToast("复制失败，请手动复制"); }
-  }));
+  winnerCard.querySelector("[data-winner-ip]")?.addEventListener("click", () => copyText(winner.ip, "已复制 IP"));
+  winnerCard.querySelector("[data-winner-summary]")?.addEventListener("click", () => copyText(argoSummary(result, winner.ip), "已复制 Argo 节点参数"));
+  resultRows.querySelectorAll("[data-copy-ip]").forEach((button) => button.addEventListener("click", () => copyText(button.dataset.copyIp || "", "已复制 IP")));
+  resultRows.querySelectorAll("[data-copy-summary]").forEach((button) => button.addEventListener("click", () => copyText(argoSummary(result, button.dataset.copySummary || ""), "已复制 Argo 节点参数")));
 }
 
 async function poll() {
@@ -230,8 +297,9 @@ function ensurePolling() {
   if (!pollTimer) pollTimer = window.setInterval(poll, 700);
 }
 
-async function applyParsed(result, sourceName) {
+async function applyParsed(result, sourceName, subscriptionUrl = "") {
   customIps = result.ips || [];
+  loadedSubscriptionUrl = subscriptionUrl;
   const warnings = (result.warnings || []).join(" · ");
   setCustomStatus(`${sourceName}：识别 ${customIps.length} 个公网 IP${warnings ? ` · ${warnings}` : ""}`, "ready");
   showToast(`已载入 ${customIps.length} 个 IP`);
@@ -257,10 +325,11 @@ ipFile.addEventListener("change", async () => {
 
 $("#fetchSubscriptionButton").addEventListener("click", async () => {
   const url = $("#subscriptionUrl").value.trim();
-  try { const result = await request("/api/ips/fetch", { url }); await applyParsed(result, `已读取 ${result.final_url || "订阅"}`); } catch (error) { setCustomStatus(error.message, "error"); }
+  try { const result = await request("/api/ips/fetch", { url }); await applyParsed(result, `已读取 ${result.final_url || "订阅"}`, result.final_url || url); } catch (error) { setCustomStatus(error.message, "error"); }
 });
 
 form.querySelectorAll("input[name=ipSource]").forEach((input) => input.addEventListener("change", updateSourcePanel));
+form.querySelectorAll("input[name=purpose]").forEach((input) => input.addEventListener("change", updatePurpose));
 form.querySelectorAll("input[name=mode]").forEach((input) => input.addEventListener("change", () => { updatePoolHint(window.rrConfig || {}); updateAutomationChoice(); }));
 form.querySelectorAll("input[name=family]").forEach((input) => input.addEventListener("change", updateAutomationChoice));
 automationEnabled.addEventListener("change", updateAutomationChoice);
@@ -278,7 +347,8 @@ form.addEventListener("submit", async (event) => {
   if (sourceIsCustom() && !customIps.length) { setCustomStatus("请先识别、导入或读取 IP 名单", "error"); return; }
   const payload = {
     mode: currentValue("mode"), family: currentValue("family"), operator: currentValue("operator"),
-    target_host: targetHost.value.trim(), source: sourceIsCustom() ? "custom" : "dns", ips: customIps, confirmed: true,
+    purpose: currentPurpose(), target_host: targetHost.value.trim(), node_port: Number.parseInt(nodePort.value, 10), ws_path: wsPath.value.trim(),
+    source: sourceIsCustom() ? "custom" : "dns", ips: customIps, subscription_url: sourceIsCustom() ? loadedSubscriptionUrl : "", confirmed: true,
   };
   const automated = automationEnabled.checked;
   if (automated) payload.interval_minutes = Number.parseInt(automationInterval.value, 10);
@@ -307,10 +377,12 @@ stopButton.addEventListener("click", async () => {
   try {
     const config = await (await fetch("/api/config", { cache: "no-store" })).json();
     window.rrConfig = config; requestToken = config.request_token || "";
-    targetHost.value = config.default_target_host || targetHost.value;
+    targetValues.argo = config.default_target_host || "";
+    targetValues.dns = config.diagnostic_default_target_host || "speed.cloudflare.com";
+    nodePort.value = String(config.default_node_port || 443);
     const savedInterval = Number.parseInt(localStorage.getItem("rr-edge-hunter-interval-minutes") || "", 10);
     if (Number.isFinite(savedInterval)) automationInterval.value = String(savedInterval);
     $("#versionLabel").textContent = `Desktop ${config.version || ""}`;
-    updatePoolHint(config); updateSourcePanel(); updateAutomationChoice(); ensurePolling(); await poll();
+    updatePoolHint(config); updatePurpose(); updateAutomationChoice(); ensurePolling(); await poll();
   } catch (error) { errorBox.hidden = false; errorBox.textContent = `初始化失败：${error.message}`; }
 })();

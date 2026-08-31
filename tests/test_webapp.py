@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import io
 import json
 import threading
 import unittest
@@ -7,7 +9,8 @@ import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-from cfopt.webapp import RuntimeState, make_handler
+from cfopt.models import FamilyRunResult, IpMetric, OptimizerResult
+from cfopt.webapp import RuntimeState, _csv_bytes, make_handler
 
 
 class CapturingState(RuntimeState):
@@ -48,7 +51,25 @@ class WebApiTest(unittest.TestCase):
             body = json.load(response)
         self.assertEqual(body["version"], "0.1.0")
         self.assertEqual(body["request_token"], self.token)
+        self.assertEqual(body["default_purpose"], "argo")
+        self.assertEqual(body["default_node_port"], 443)
         self.assertGreater(body["max_custom_ips"], 0)
+
+    def test_dns_csv_does_not_emit_argo_node_parameters(self) -> None:
+        family = FamilyRunResult(
+            "IPv4", [IpMetric("104.16.0.1", "IPv4")], []
+        )
+        result = OptimizerResult(
+            created_at="2026-01-01T00:00:00Z", mode="balanced", operator="自动",
+            requested_family="ipv4", ip_count=1, target_host="speed.cloudflare.com",
+            source_kind="当前 DNS", families=[family], elapsed_seconds=1.0, purpose="dns",
+        )
+        rows = list(csv.reader(io.StringIO(_csv_bytes(result).decode("utf-8-sig"))))
+        header = rows[0]
+        values = dict(zip(header, rows[1]))
+        self.assertEqual(values["ip"], "104.16.0.1")
+        for key in ("server", "port", "sni", "host", "ws_path"):
+            self.assertEqual(values[key], "")
 
     def test_parse_ip_endpoint(self) -> None:
         with self._post("/api/ips/parse", {"text": "104.16.0.1\n2606:4700::1111", "filename": "ips.txt"}) as response:
@@ -65,8 +86,32 @@ class WebApiTest(unittest.TestCase):
             body = json.load(response)
         self.assertTrue(body["ok"])
         self.assertEqual(self.state.submitted_config["_ips"], ["104.16.0.1", "2606:4700::1111"])
-        self.assertEqual(self.state.submitted_config["source"], "我的 IP 名单")
+        self.assertEqual(self.state.submitted_config["source"], "智能候选池 + 我的 IP 名单")
+        self.assertEqual(self.state.submitted_config["purpose"], "argo")
         self.assertGreater(self.state.submitted_config["traffic_upper_bound_mb"], 0)
+
+    def test_argo_start_preserves_node_parameters_without_credentials(self) -> None:
+        payload = {
+            "purpose": "argo", "mode": "balanced", "family": "ipv4", "operator": "自动",
+            "target_host": "argo.example.com", "node_port": 8443, "ws_path": "/vless?ed=2048",
+            "source": "dns", "confirmed": True,
+        }
+        with self._post("/api/start", payload) as response:
+            self.assertTrue(json.load(response)["ok"])
+        self.assertEqual(self.state.submitted_config["target_host"], "argo.example.com")
+        self.assertEqual(self.state.submitted_config["node_port"], 8443)
+        self.assertEqual(self.state.submitted_config["ws_path"], "/vless?ed=2048")
+        self.assertNotIn("uuid", self.state.submitted_config)
+
+    def test_argo_start_rejects_url_ip_port_and_unsafe_ws_path(self) -> None:
+        base = {"purpose": "argo", "mode": "balanced", "family": "ipv4", "source": "dns", "confirmed": True}
+        for host in ("https://argo.example.com/path", "104.16.0.1", "argo.example.com:443"):
+            with self.subTest(host=host), self.assertRaises(urllib.error.HTTPError) as raised:
+                self._post("/api/start", {**base, "target_host": host})
+            self.assertEqual(raised.exception.code, 400)
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            self._post("/api/start", {**base, "target_host": "argo.example.com", "ws_path": "/ws%zz"})
+        self.assertEqual(raised.exception.code, 400)
 
     def test_start_requires_explicit_traffic_confirmation(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as raised:
