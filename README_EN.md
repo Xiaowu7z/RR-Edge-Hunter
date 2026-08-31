@@ -8,4 +8,8 @@ It supports IPv4, IPv6, dual stack, Asian POP hunting, local history, JSON/CSV e
 
 The project does not write arbitrary IPs to DNS, generate proxy/hosts configurations, or force traffic to an unassigned edge address.
 
+## Windows portable build
+
+After the first formal release, download and extract the [latest Windows portable package](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip), then double-click `CF-IP-Optimizer.exe`. Python is bundled; keep the adjacent `_internal` directory intact.
+
 See the Chinese README for setup, format limits, safety boundaries, and release instructions.

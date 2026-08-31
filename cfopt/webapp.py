@@ -21,10 +21,11 @@ from .history import load_history, save_history
 from .ip_sources import IpSourceError, MAX_IPS, MAX_SOURCE_BYTES, fetch_ip_subscription, normalize_ip_values, parse_ip_source
 from .models import MODES, OptimizerResult, SPEED_HOST
 from .pipeline import MAX_CANDIDATES_PER_FAMILY, run_optimizer
+from .resources import package_root
 from .version import VERSION
 
 
-WEB_DIR = Path(__file__).resolve().parents[1] / "web"
+WEB_DIR = package_root() / "web"
 MAX_REQUEST_BYTES = MAX_SOURCE_BYTES + 64 * 1024
 MIN_AUTOMATION_INTERVAL_MINUTES = 5
 MAX_AUTOMATION_INTERVAL_MINUTES = 1_440
@@ -488,8 +489,8 @@ def serve(host: str = "127.0.0.1", port: int = 0, open_browser: bool = True) -> 
     actual_port = server.server_address[1]
     url_host = f"[{host}]" if parsed_host is not None and parsed_host.version == 6 else host
     url = f"http://{url_host}:{actual_port}/"
-    print(f"RR Edge Hunter 已启动：{url}")
-    print("保持此窗口运行；按 Ctrl+C 退出。")
+    print(f"RR Edge Hunter 已启动：{url}", flush=True)
+    print("保持此窗口运行；按 Ctrl+C 退出。", flush=True)
     if open_browser:
         threading.Timer(0.35, lambda: webbrowser.open(url)).start()
     try:

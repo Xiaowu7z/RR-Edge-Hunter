@@ -23,6 +23,12 @@ Cloudflare 的公共 IP 范围是归属范围，不是官方“优选 IP 池”�
 
 ## 快速开始
 
+### Windows 免安装版（推荐）
+
+正式版发布后，下载并解压 [最新版 Windows 便携包](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip)，双击其中的 `CF-IP-Optimizer.exe` 即可。运行环境已内置，**不需要安装 Python**；请保留同目录的 `_internal` 文件夹。
+
+### 源码运行
+
 要求：Python 3.11 或更高版本，不需要第三方 Python 包。
 
 Windows：双击 `start-windows.bat`。
@@ -101,10 +107,13 @@ node --check web/app.js
 
 ## 发布
 
-创建标签 `vX.Y.Z` 后，GitHub Actions 会运行回归测试并生成桌面 ZIP、manifest 与 SHA-256。标签版本会同时写入产物名、manifest 和 ZIP 根目录的 `VERSION` 文件；解压后的界面/API/导出结果会读取该文件，不会一直显示开发版 `0.1.0`。构建器只读取该标签提交中明确允许的源码文件，未跟踪文件和本地密钥不会进入发布包。也可本地执行：
+创建标签 `vX.Y.Z` 后，GitHub Actions 会运行回归测试并生成两类产物：面向普通 Windows 用户的 `CF-IP-Optimizer-Windows-x64.zip`（内置 `CF-IP-Optimizer.exe`，无需 Python），以及跨平台源码 ZIP、manifest 与 SHA-256。标签版本会同时写入产物名、manifest 和运行时 `VERSION` 文件；解压后的界面/API/导出结果会读取该文件，不会一直显示开发版 `0.1.0`。两个构建器都只读取标签提交中的源码，未跟踪文件和本地密钥不会进入发布包。也可本地执行：
 
 ```bash
 python tools/build_release.py --version X.Y.Z
+# 在 Windows 上：
+python -m pip install pyinstaller==6.11.1
+python tools/build_portable_release.py --version X.Y.Z --target Windows-x64
 ```
 
 项目尚未选择开源许可证；在复用或分发代码前，请先取得版权所有者许可。
