@@ -35,7 +35,7 @@ BALANCED = ModeParams(
     full_rounds=2,
     micro_candidates=10,
     final_candidates=2,
-    pre_concurrency=32,
+    pre_concurrency=50,
     micro_concurrency=1,
 )
 
@@ -48,7 +48,7 @@ ASIA_HUNT = ModeParams(
     full_rounds=2,
     micro_candidates=10,
     final_candidates=3,
-    pre_concurrency=32,
+    pre_concurrency=50,
     micro_concurrency=1,
     asia_hunt=True,
 )
@@ -60,9 +60,9 @@ MAX_BANDWIDTH = ModeParams(
     micro_bytes=0,
     full_bytes=0,
     full_rounds=2,
-    micro_candidates=10,
+    micro_candidates=20,
     final_candidates=3,
-    pre_concurrency=32,
+    pre_concurrency=50,
     micro_concurrency=1,
     early_stop=False,
 )

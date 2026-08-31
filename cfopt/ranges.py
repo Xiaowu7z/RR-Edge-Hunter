@@ -70,8 +70,17 @@ def prefix_of(value: str) -> str:
     return str(ipaddress.ip_network(f"{address}/{prefix}", strict=False))
 
 
-def sample_official_cloudflare_ips(family: str, limit: int = DEFAULT_OFFICIAL_SAMPLE_LIMIT) -> list[str]:
-    """Return a stable, evenly spread sample from Cloudflare's published CIDRs."""
+def sample_official_cloudflare_ips(
+    family: str,
+    limit: int = DEFAULT_OFFICIAL_SAMPLE_LIMIT,
+    seed: object | None = None,
+) -> list[str]:
+    """Return a bounded, evenly spread sample from Cloudflare's published CIDRs.
+
+    With no seed the historical stable sample is retained for callers that need
+    reproducibility.  A run-scoped seed rotates the addresses inside every
+    official prefix without changing the prefix coverage or the hard limit.
+    """
     if family not in {"IPv4", "IPv6"}:
         raise ValueError("协议族必须是 IPv4 或 IPv6")
     if limit <= 0:
@@ -92,8 +101,9 @@ def sample_official_cloudflare_ips(family: str, limit: int = DEFAULT_OFFICIAL_SA
         offsets: set[int] = set()
         cursor = 0
         while len(offsets) < count:
+            seed_part = "" if seed is None else f":{seed}"
             digest = hashlib.blake2b(
-                f"rr-edge-hunter:official:{network.with_prefixlen}:{cursor}".encode("ascii"),
+                f"rr-edge-hunter:official{seed_part}:{network.with_prefixlen}:{cursor}".encode("utf-8"),
                 digest_size=16,
             ).digest()
             offsets.add(int.from_bytes(digest, "big") % span)

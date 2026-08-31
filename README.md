@@ -2,7 +2,7 @@
 
 **CF 优选 IP · 电脑端**
 
-RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默认不需要填写域名：应用把 `speed.cloudflare.com` 固定到每个候选 IP 的 `443` 端口，保留严格 TLS 证书、SNI、Host、CF-RAY 与真实 socket 对端校验，再通过“并发快筛 + 前 10 名一秒吞吐 + 达标复测早停”找出当前网络更快、更稳定的入口。
+RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默认不需要填写域名：先对受控候选做三轮并发 TCP 快筛，再把 `speed.cloudflare.com` 严格固定到入围 IP 的 `443` 端口，校验证书、SNI、Host、CF-RAY 与真实 socket 对端，并通过一秒真实下载与复测找出当前网络更快、更稳定的入口。
 
 优选结果是一个裸 IPv4 或 IPv6。把它填入 VMess / VLESS 等节点的 `address` 或 `server` 字段即可；节点原来的端口、UUID、协议、TLS SNI、HTTP Host、WS Path 等参数全部保持不变。
 
@@ -16,24 +16,18 @@ RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默�
 | 期望带宽 | 100 Mbps |
 | 测速策略 | 亚洲狩猎 |
 | 测速身份 | `speed.cloudflare.com:443` |
-| 候选来源 | Cloudflare 官方池；可叠加用户导入的官方 IP |
+| 候选来源 | 默认 Cloudflare 官方池；可叠加用户导入的受限公网 IP |
 | 输出用途 | 只替换节点 `address/server` |
 
-亚洲狩猎仍以成功率、复核底线、最低与平均吞吐和波动为主；HKG、NRT、SIN、ICN、TPE 等 POP 只在成绩接近时加分，不会让明显更慢的亚洲入口排到高速稳定入口之前。均衡与亚洲狩猎在达到期望带宽并复测通过后立即停止；“最大带宽”会测完入围的前 10 个 IP，并复测最快的前 3 个，适合寻找当前线路的下载极限。
+亚洲狩猎仍以成功率、复核底线、最低与平均吞吐和波动为主；HKG、NRT、SIN、ICN、TPE 等 POP 只在成绩接近时加分，不会让明显更慢的亚洲入口排到高速稳定入口之前。均衡与亚洲狩猎在达到期望带宽并复测通过后立即停止；“最大带宽”会扩大真实下载候选范围并复测最快结果，专门寻找当前线路实测下载速度最高的 IP。
 
 ## 下载与运行
 
-### Windows 安装版（推荐）
-
-[⬇️ 下载最新版 Windows 安装程序](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Setup.exe)
-
-双击 `CF-IP-Optimizer-Setup.exe` 按提示安装即可。安装包已经包含运行环境，无需另外安装 Python，也无需选择压缩包或 CPU 架构。
-
-### Windows 便携版（免安装）
+### Windows 便携版（唯一正式版）
 
 [📦 下载最新版 Windows x64 便携包](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip)
 
-解压 `CF-IP-Optimizer-Windows-x64.zip`，进入 `CF-IP-Optimizer` 文件夹后双击 `CF-IP-Optimizer.exe` 即可运行。便携包同样内置运行环境，无需安装 Python；请保留 `CF-IP-Optimizer.exe` 与 `_internal` 文件夹的相对位置，不要只把 EXE 单独移出。
+解压 `CF-IP-Optimizer-Windows-x64.zip`，进入 `CF-IP-Optimizer` 文件夹后双击 `CF-IP-Optimizer.exe` 即可运行。便携包已内置运行环境，无需安装 Python；请保留 `CF-IP-Optimizer.exe` 与 `_internal` 文件夹的相对位置，不要只把 EXE 单独移出。仓库不再提供安装程序。
 
 ### 源码运行
 
@@ -48,10 +42,11 @@ RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默�
 ## 工作方式
 
 1. 获取 `speed.cloudflare.com` 当前 DNS 种子，并加载 Cloudflare 官方 CIDR 的受控分散抽样；每个协议族最多保留 100 个候选。
-2. 如用户导入名单，将其中属于 Cloudflare 官方网段的地址加入候选；非 CF 地址不会进入默认测试池。
-3. 用最多 32 路并发执行小流量 HTTPS 快筛，固定候选 IP，并严格核对系统证书、TLS SNI、HTTP Host、CF-RAY 与真实 TCP 对端。
-4. 按 TTFB/TCP 从可用候选中取前 10 名，逐个执行约 1 秒的有界吞吐测试。均衡/亚洲狩猎达到目标后复测一次并早停；最大带宽则测完前 10 名并复测最快的前 3 名。
-5. 按成功率、复测底线、最低/平均吞吐、波动、TTFB 排名，并标注是否达到用户设定的带宽目标。
+2. 如用户导入名单，任意安全公网单播 IP 均可作为“受限候选”；私网、本地、组播和保留地址会被拒绝。默认一键池仍只包含 Cloudflare 官方来源，不预置第三方远程池。
+3. 用最多 50 路并发对每个候选执行三次、单次 1 秒上限的 TCP 连接快筛；任一轮失败即淘汰。这个阶段只负责缩小范围，不能产生可复制结果。
+4. 均衡/亚洲狩猎从低延迟候选中取前 10 名；最大带宽取 20 名，并保留部分跨延迟区间和不同前缀的候选，避免漏掉高吞吐入口。
+5. 对入围候选逐个执行约 1 秒的有界 HTTPS 真实下载，严格核对系统证书、TLS SNI、HTTP Host、CF-RAY 与真实 TCP 对端。均衡/亚洲狩猎达标后复测并早停；最大带宽测完全部入围候选，再按两次成功样本的平均速度复测补位并选择最快结果。
+6. 只有完成两次成功严格下载复测的候选才会进入最终排名和复制结果；再按复测底线、平均吞吐、波动与 TTFB 排名，并标注是否达到用户设定的带宽目标。
 
 默认模式测的是“用户当前网络到 Cloudflare 入口”的质量，不需要知道 VPS 源站 IP，也不会更改节点配置。
 
@@ -66,9 +61,9 @@ RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默�
 | 文件 | TXT、CSV、TSV、JSON、Base64 文本 |
 | 链接 | 仅 HTTPS 默认 443；限制大小和跳转，并逐跳复核公网目标 |
 
-导入不要求与 `speed.cloudflare.com` 当前 DNS 求交，但必须属于 Cloudflare 官方 CIDR。私网、回环、链路本地、保留地址、非 CF 地址和错误协议族都会被拒绝或忽略；候选量、并发和真实下载流量均有硬上限。
+导入不要求与 `speed.cloudflare.com` 当前 DNS 求交，也不要求地址属于 Cloudflare 官方 CIDR。外部公网地址只能作为受限候选：必须先通过三轮 TCP，再通过两次固定到 `speed.cloudflare.com:443` 的系统证书、SNI、Host、真实 peer 与 CF-RAY 下载复测后才可输出；Argo 模式还须额外通过节点域名兼容门禁。私网、回环、链路本地、组播、保留地址和错误协议族会被拒绝或忽略；候选量、并发和真实下载流量均有硬上限。
 
-第三方非官方反代不会混入默认官方池。
+工具不会内置或远程拉取任何第三方反代池；用户明确导入的外部地址也不会绕过上述验证。
 
 ## 高级：Argo 兼容复核
 
@@ -87,6 +82,7 @@ RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默�
 同步规则：
 
 - IPv4 只写 `A`，IPv6 只写 `AAAA`；
+- 只接受当前本轮已完成两次严格下载复测的稳定冠军；该冠军可以来自官方网段或用户明确导入并验证通过的外部公网候选；
 - 写入记录强制为 **DNS-only（灰云）**，避免再次经过 Cloudflare 代理形成错误链路；
 - 必须填写 32 位 **Zone ID** 和完整记录名 **FQDN**，例如 `edge.example.com`；
 - 只接受 Cloudflare API Token，不接受 Global API Key；最小权限为目标 Zone 的 **DNS: Edit**；
@@ -115,7 +111,7 @@ DNS 同步是一个独立可选输出。它不会修改 Argo 域名、节点 UUI
 python rr_optimizer.py run --purpose direct --family ipv4 --mode asia --target-mbps 100
 ```
 
-叠加本地官方 IP 名单：
+叠加本地公网 IP 名单（外部地址按受限候选验证）：
 
 ```bash
 python rr_optimizer.py run --purpose direct --family ipv4 --mode asia --ips my-ip-list.txt --csv result.csv
@@ -147,6 +143,6 @@ node --check web/app.js
 
 ## 发布
 
-`main` 通过测试后，GitHub Actions 会替换唯一的正式 Release，同时生成 Windows x64 安装版、免安装便携版及各自的 SHA-256。旧正式包与测试通道不会继续保留。当前应用版本保持 **1.0.0**。
+`main` 通过测试后，GitHub Actions 会替换唯一的正式 Release，只生成 Windows x64 免安装便携包及其 SHA-256。旧正式包、安装版与测试通道不会继续保留。当前应用版本保持 **1.0.0**。
 
 项目尚未选择开源许可证；复用或分发代码前请先取得版权所有者许可。

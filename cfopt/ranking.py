@@ -86,6 +86,7 @@ def rank_asia(metrics: list[IpMetric]) -> list[IpMetric]:
     return sorted(
         metrics,
         key=lambda item: (
+            -int(_confirmed(item)),
             -item.round_floor_mbps,
             -item.success_rate_pct,
             -item.min_complete_mbps,

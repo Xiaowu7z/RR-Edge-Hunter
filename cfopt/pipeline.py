@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import functools
 import hashlib
+import ipaddress
 import socket
 import stat
 import statistics
@@ -16,7 +17,7 @@ from typing import Callable, Iterable
 from .hostnames import HostnameError, normalize_hostname
 from .ip_sources import MAX_SOURCE_BYTES, IpSourceError, decode_ip_source_bytes, normalize_ip_values, parse_ip_source
 from .models import ASIA_HUNT, BALANCED, MODES, FamilyRunResult, IpMetric, ModeParams, OptimizerResult, PopDiscovery, ProbeResult, Snapshot, SPEED_HOST
-from .probe import probe_argo_compatibility, probe_download, probe_speed_window, probe_trace, speed_request_bytes
+from .probe import probe_argo_compatibility, probe_download, probe_speed_window, probe_tcp_rtt, probe_trace, speed_request_bytes
 from .ranges import family_of, is_cloudflare_ip, normalized_ip, prefix_of, sample_official_cloudflare_ips
 from .ranking import address_floor, median_ttfb, rank, rank_asia, rank_maximum, stability_label, success_rate, variation
 
@@ -25,8 +26,10 @@ StageCallback = Callable[[str, int, int, str], None]
 LogCallback = Callable[[str], None]
 ProbeFunction = Callable[..., ProbeResult]
 SpeedProbeFunction = Callable[..., ProbeResult]
+RttProbeFunction = Callable[..., ProbeResult]
 TraceFunction = Callable[..., tuple[str, str]]
 CompatibilityFunction = Callable[..., ProbeResult]
+CandidateGateFunction = Callable[[str], bool]
 ResolveFunction = Callable[[str], list[str]]
 
 ASIA_POP_ORDER = ("HKG", "NRT", "SIN", "ICN", "TPE")
@@ -38,6 +41,7 @@ PURPOSE_DNS = "dns"
 SUPPORTED_TLS_PORTS = {443, 2053, 2083, 2087, 2096, 8443}
 MIN_TARGET_MBPS = 1
 MAX_TARGET_MBPS = 10_000
+RESTRICTED_PUBLIC_SOURCE = "我的 IP 名单（受限公网候选）"
 
 
 class OptimizerCancelled(RuntimeError):
@@ -46,6 +50,30 @@ class OptimizerCancelled(RuntimeError):
 
 class NetworkChanged(RuntimeError):
     pass
+
+
+def _is_safe_public_ip(value: str) -> bool:
+    """Accept routable unicast addresses, never local/reserved destinations."""
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return bool(
+        address.is_global
+        and not address.is_private
+        and not address.is_loopback
+        and not address.is_link_local
+        and not address.is_multicast
+        and not address.is_reserved
+        and not address.is_unspecified
+    )
+
+
+def _normalize_restricted_candidates(candidates: Iterable[str]) -> tuple[list[str], int]:
+    """Parse user input while preserving a count of unsafe/invalid entries."""
+    parsed = parse_ip_source("\n".join(str(value) for value in candidates), "values.txt")
+    safe = [value for value in parsed.ips if _is_safe_public_ip(value)]
+    return safe, parsed.ignored + len(parsed.ips) - len(safe)
 
 
 def pop_priority(pop: str) -> int:
@@ -132,36 +160,35 @@ def _build_argo_candidates(
     candidates: Iterable[str] | None,
     resolved_ips: Iterable[str],
     log: LogCallback,
+    sample_seed: object | None = None,
 ) -> tuple[list[str], int, str, dict[str, list[str]]]:
     resolved = list(dict.fromkeys(normalized_ip(value) for value in resolved_ips))
     cf_resolved = [value for value in resolved if is_cloudflare_ip(value)]
     if not cf_resolved:
         raise ValueError("Argo 域名当前 DNS 未返回 Cloudflare 公共边缘地址；请确认域名已启用 Cloudflare 代理")
 
-    official = sample_official_cloudflare_ips("IPv4") + sample_official_cloudflare_ips("IPv6")
-    supplied_cf: list[str] = []
+    official = sample_official_cloudflare_ips("IPv4", seed=sample_seed) + sample_official_cloudflare_ips("IPv6", seed=sample_seed)
+    supplied_public: list[str] = []
     rejected = 0
     if candidates is not None:
         try:
-            supplied = normalize_ip_values(candidates)
+            supplied_public, rejected = _normalize_restricted_candidates(candidates)
         except IpSourceError as exc:
             raise ValueError(str(exc)) from exc
-        supplied_cf = [value for value in supplied if is_cloudflare_ip(value)]
-        rejected = len(supplied) - len(supplied_cf)
         if rejected:
-            log(f"导入名单中 {rejected} 个非 Cloudflare 官方网段地址已隔离，不会连接")
+            log(f"导入名单中 {rejected} 个无效、私网、本地或保留地址已拒绝")
 
-    merged = list(dict.fromkeys([*cf_resolved, *official, *supplied_cf]))
+    merged = list(dict.fromkeys([*cf_resolved, *official, *supplied_public]))
     sources: dict[str, list[str]] = {
         "当前 DNS": cf_resolved,
         "内置 Cloudflare 官方 CIDR 快照抽样": official,
     }
     if candidates is not None:
-        sources["我的 IP 名单（官方网段）"] = supplied_cf
+        sources[RESTRICTED_PUBLIC_SOURCE] = supplied_public
     label = "智能候选池" if candidates is None else "智能候选池 + 我的 IP 名单"
     log(
         f"Argo 智能候选：当前 DNS {len(cf_resolved)} + 内置官方 CIDR 快照抽样 {len(official)}"
-        + (f" + 导入可用 {len(supplied_cf)}" if candidates is not None else "")
+        + (f" + 导入受限公网候选 {len(supplied_public)}（须通过严格 CF 身份复测和 Argo 门禁）" if candidates is not None else "")
     )
     return merged, rejected, label, sources
 
@@ -170,43 +197,43 @@ def _build_direct_candidates(
     candidates: Iterable[str] | None,
     resolved_ips: Iterable[str],
     log: LogCallback,
+    sample_seed: object | None = None,
 ) -> tuple[list[str], int, str, dict[str, list[str]]]:
     """Build the normal IP-hunting pool without requiring a user's Argo host.
 
     The public speed host contributes live DNS seeds, while deterministic,
     bounded samples from every published Cloudflare CIDR provide broad
-    coverage.  User input can extend that pool, but non-Cloudflare addresses
-    never reach a network probe.
+    coverage.  User input can extend that pool with any safe public unicast
+    address.  Such external addresses remain restricted candidates until two
+    strict speed.cloudflare.com identity-checked downloads succeed.
     """
     resolved = list(dict.fromkeys(normalized_ip(value) for value in resolved_ips))
     cf_resolved = [value for value in resolved if is_cloudflare_ip(value)]
     if not cf_resolved:
         raise ValueError("Cloudflare 公共测速端点当前 DNS 未返回官方边缘地址")
 
-    official = sample_official_cloudflare_ips("IPv4") + sample_official_cloudflare_ips("IPv6")
-    supplied_cf: list[str] = []
+    official = sample_official_cloudflare_ips("IPv4", seed=sample_seed) + sample_official_cloudflare_ips("IPv6", seed=sample_seed)
+    supplied_public: list[str] = []
     rejected = 0
     if candidates is not None:
         try:
-            supplied = normalize_ip_values(candidates)
+            supplied_public, rejected = _normalize_restricted_candidates(candidates)
         except IpSourceError as exc:
             raise ValueError(str(exc)) from exc
-        supplied_cf = [value for value in supplied if is_cloudflare_ip(value)]
-        rejected = len(supplied) - len(supplied_cf)
         if rejected:
-            log(f"导入名单中 {rejected} 个非 Cloudflare 官方网段地址已隔离，不会连接")
+            log(f"导入名单中 {rejected} 个无效、私网、本地或保留地址已拒绝")
 
-    merged = list(dict.fromkeys([*cf_resolved, *official, *supplied_cf]))
+    merged = list(dict.fromkeys([*cf_resolved, *official, *supplied_public]))
     sources: dict[str, list[str]] = {
         "Cloudflare 测速端点 DNS 种子": cf_resolved,
         "Cloudflare 官方 CIDR 分散抽样": official,
     }
     if candidates is not None:
-        sources["我的 IP 名单（官方网段）"] = supplied_cf
+        sources[RESTRICTED_PUBLIC_SOURCE] = supplied_public
     label = "Cloudflare 官方 IP 池" if candidates is None else "Cloudflare 官方 IP 池 + 我的名单"
     log(
         f"独立优选池：测速端点 DNS 种子 {len(cf_resolved)} + 官方 CIDR 分散抽样 {len(official)}"
-        + (f" + 导入可用 {len(supplied_cf)}" if candidates is not None else "")
+        + (f" + 导入受限公网候选 {len(supplied_public)}（须通过两次严格 CF 身份复测）" if candidates is not None else "")
     )
     return merged, rejected, label, sources
 
@@ -223,7 +250,7 @@ def build_snapshot(
     normalized: list[str] = []
     seen: set[str] = set()
     original = list(ips)
-    on_stage(f"候选校验 {family}", 0, len(original), "校验 Cloudflare 地址与协议族")
+    on_stage(f"候选校验 {family}", 0, len(original), "校验公网单播地址与协议族")
     for index, raw in enumerate(original, 1):
         _cancelled(cancel_event)
         try:
@@ -231,7 +258,7 @@ def build_snapshot(
         except ValueError:
             on_stage(f"候选校验 {family}", index, len(original), str(raw))
             continue
-        if value not in seen and family_of(value) == family and is_cloudflare_ip(value):
+        if value not in seen and family_of(value) == family and _is_safe_public_ip(value):
             seen.add(value)
             normalized.append(value)
         on_stage(f"候选校验 {family}", index, len(original), value)
@@ -249,9 +276,22 @@ def build_snapshot(
                 tagged.append(value)
         filtered_sources[tag] = tagged
     if len(normalized) > MAX_CANDIDATES_PER_FAMILY:
-        selected = list(dict.fromkeys(filtered_sources.get("当前 DNS", [])))[:MAX_CANDIDATES_PER_FAMILY]
+        priority_tags = [tag for tag in filtered_sources if "DNS" in tag]
+        priority_tags.extend(
+            tag for tag in filtered_sources
+            if tag not in priority_tags and ("我的 IP" in tag or "我的名单" in tag)
+        )
+        selected: list[str] = []
+        for tag in priority_tags:
+            for value in filtered_sources[tag]:
+                if value not in selected:
+                    selected.append(value)
+                    if len(selected) >= MAX_CANDIDATES_PER_FAMILY:
+                        break
+            if len(selected) >= MAX_CANDIDATES_PER_FAMILY:
+                break
         seen_selected = set(selected)
-        buckets = [values for tag, values in filtered_sources.items() if tag != "当前 DNS" and values]
+        buckets = [values for tag, values in filtered_sources.items() if tag not in priority_tags and values]
         positions = [0 for _ in buckets]
         while len(selected) < MAX_CANDIDATES_PER_FAMILY and buckets:
             progressed = False
@@ -324,9 +364,12 @@ def estimate_traffic_upper_bound_mb(
 ) -> float:
     gate = len(snapshot.ips) * params.pre_bytes
     shortlist = min(len(snapshot.ips), params.micro_candidates)
-    confirmations = min(shortlist, params.final_candidates)
     per_sample = speed_request_bytes(target_mbps, maximum=not params.early_stop)
-    return (gate + (shortlist + confirmations) * per_sample) / 1_000_000.0
+    # Every shortlisted address can consume one first sample and at most one
+    # confirmation sample.  In target modes several first samples may hit the
+    # threshold and then fail confirmation; maximum mode may need to walk past
+    # failed finalists.  Two samples per address is therefore the real bound.
+    return (gate + shortlist * 2 * per_sample) / 1_000_000.0
 
 
 def network_fingerprint() -> tuple[str, str]:
@@ -384,6 +427,62 @@ def _run_parallel_probes(
             completed += 1
             on_stage(stage_name, completed, len(ips), ip)
     return {ip: results.get(ip, ProbeResult(ok=False, target_ip=ip)) for ip in ips}
+
+
+def _run_parallel_rtt_rounds(
+    ips: list[str],
+    rounds: int,
+    timeout_sec: float,
+    concurrency: int,
+    stage_name: str,
+    cancel_event: threading.Event,
+    on_stage: StageCallback,
+    rtt_probe_fn: RttProbeFunction,
+) -> dict[str, ProbeResult]:
+    """Require every candidate to pass every bounded TCP-connect RTT round."""
+    required = max(1, int(rounds))
+    total = len(ips) * required
+    on_stage(stage_name, 0, total, "")
+    samples: dict[str, list[float]] = {ip: [] for ip in ips}
+    eligible = list(ips)
+    completed = 0
+    for _round in range(required):
+        if not eligible:
+            break
+        current = list(eligible)
+        passed: list[str] = []
+        with ThreadPoolExecutor(max_workers=max(1, concurrency), thread_name_prefix="rr-rtt") as pool:
+            futures = {
+                pool.submit(rtt_probe_fn, ip, timeout_sec, cancel_event): ip
+                for ip in current
+            }
+            for future in as_completed(futures):
+                _cancelled(cancel_event)
+                ip = futures[future]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = ProbeResult(ok=False, error=f"{type(exc).__name__}: {exc}", target_ip=ip)
+                if result.ok and result.tcp_ms >= 0.0:
+                    samples[ip].append(result.tcp_ms)
+                    passed.append(ip)
+                completed += 1
+                on_stage(stage_name, completed, total, ip)
+        passed_set = set(passed)
+        eligible = [ip for ip in current if ip in passed_set]
+
+    eligible_set = set(eligible)
+    return {
+        ip: ProbeResult(
+            ok=ip in eligible_set and len(samples[ip]) == required,
+            target_ip=ip,
+            actual_remote_address=ip if ip in eligible_set else "",
+            target_matches_remote=ip in eligible_set,
+            tcp_ms=statistics.fmean(samples[ip]) if len(samples[ip]) == required else -1.0,
+            ttfb_ms=statistics.fmean(samples[ip]) if len(samples[ip]) == required else -1.0,
+        )
+        for ip in ips
+    }
 
 
 def _discover_pops(
@@ -446,6 +545,65 @@ def _pre_rank(ips: list[str], cache: dict[str, ProbeResult], pops: dict[str, str
     return sorted(ips, key=key)
 
 
+def _select_speed_candidates(
+    ranked: list[str],
+    limit: int,
+    maximum: bool = False,
+    preferred: Iterable[str] = (),
+) -> list[str]:
+    """Choose the real-download shortlist without making it latency-only.
+
+    Normal target modes retain strict latency order for fast early stopping.
+    Maximum-bandwidth mode keeps most of the fastest addresses and reserves a
+    small, evenly spaced tail for different /24 or /48 paths that a pure RTT
+    top-N would otherwise discard.
+    """
+    bounded = max(0, int(limit))
+    if bounded <= 0 or not ranked:
+        return []
+    preferred_set = set(preferred)
+    if not maximum or len(ranked) <= bounded:
+        selected = ranked[:bounded]
+    else:
+        reserve = min(max(2, bounded // 5), bounded - 1)
+        primary_count = bounded - reserve
+        selected = list(ranked[:primary_count])
+        selected_set = set(selected)
+        prefixes = {prefix_of(ip) for ip in selected}
+        tail = ranked[primary_count:]
+
+        # Pick one address from each evenly spaced latency band where possible.
+        for band in range(reserve):
+            start = len(tail) * band // reserve
+            end = max(start + 1, len(tail) * (band + 1) // reserve)
+            bucket = tail[start:end]
+            chosen = next((ip for ip in bucket if prefix_of(ip) not in prefixes), None)
+            chosen = chosen or next((ip for ip in bucket if ip not in selected_set), None)
+            if chosen is None:
+                continue
+            selected.append(chosen)
+            selected_set.add(chosen)
+            prefixes.add(prefix_of(chosen))
+
+        if len(selected) < bounded:
+            selected.extend(ip for ip in ranked if ip not in selected_set)
+        selected = selected[:bounded]
+
+    selected_set = set(selected)
+    for ip in (item for item in ranked if item in preferred_set and item not in selected_set):
+        replace_at = next(
+            (index for index in range(len(selected) - 1, -1, -1) if selected[index] not in preferred_set),
+            None,
+        )
+        if replace_at is None:
+            break
+        selected_set.remove(selected[replace_at])
+        selected[replace_at] = ip
+        selected_set.add(ip)
+    order = {ip: index for index, ip in enumerate(ranked)}
+    return sorted(selected, key=order.__getitem__)
+
+
 def _run_full_rounds(
     ips: list[str],
     params: ModeParams,
@@ -487,15 +645,38 @@ def _run_fast_speed_stage(
     log: LogCallback,
     speed_probe_fn: SpeedProbeFunction,
     family: str,
+    candidate_gate: CandidateGateFunction | None = None,
+    gate_passed: set[str] | None = None,
+    gate_rejected: set[str] | None = None,
+    confirmed_output: set[str] | None = None,
 ) -> dict[str, list[ProbeResult]]:
     """Run one-second samples sequentially and stop once a result is confirmed."""
     output: dict[str, list[ProbeResult]] = {}
     confirmed: set[str] = set()
     completed = 0
     maximum = not params.early_stop
-    total = len(ips) + min(len(ips), params.final_candidates)
+    # This is a hard upper bound: no address is sampled more than twice.
+    total = len(ips) * 2
     stage = f"1 秒吞吐测速 {family}"
     on_stage(stage, 0, total, "全部测速" if maximum else f"达到 {target_mbps} Mbps 后复测并早停")
+
+    def accepted(ip: str) -> bool:
+        if candidate_gate is None:
+            return True
+        if gate_passed is not None and ip in gate_passed:
+            return True
+        if gate_rejected is not None and ip in gate_rejected:
+            return False
+        try:
+            allowed = bool(candidate_gate(ip))
+        except Exception:
+            allowed = False
+        if allowed:
+            if gate_passed is not None:
+                gate_passed.add(ip)
+        elif gate_rejected is not None:
+            gate_rejected.add(ip)
+        return allowed
 
     def once(ip: str) -> ProbeResult:
         nonlocal completed
@@ -517,16 +698,16 @@ def _run_fast_speed_stage(
         if params.early_stop and first.ok and first.complete_mbps >= target_mbps:
             second = once(ip)
             output[ip].append(second)
-            if second.ok:
+            if second.ok and accepted(ip):
                 confirmed.add(ip)
-            if second.ok and min(first.complete_mbps, second.complete_mbps) >= target_mbps:
+            if ip in confirmed and min(first.complete_mbps, second.complete_mbps) >= target_mbps:
                 early_winner = ip
                 log(f"{family} {ip} 两次 1 秒实测均达到 {target_mbps} Mbps，提前结束")
                 break
 
     if not early_winner:
         ranked_first = sorted(
-            (ip for ip in tested if output[ip][0].ok and not (len(output[ip]) >= 2 and any(not item.ok for item in output[ip]))),
+            (ip for ip in tested if output[ip][0].ok),
             key=lambda ip: (
                 -output[ip][0].complete_mbps,
                 -output[ip][0].payload_mbps,
@@ -540,10 +721,18 @@ def _run_fast_speed_stage(
                 break
             if ip in confirmed:
                 continue
-            output[ip].append(once(ip))
-            confirmed.add(ip)
-            needed -= 1
+            # An address that already failed its one allowed confirmation is
+            # not silently rehabilitated by a third try; move to the next one.
+            if len(output[ip]) >= 2:
+                continue
+            second = once(ip)
+            output[ip].append(second)
+            if second.ok and accepted(ip):
+                confirmed.add(ip)
+                needed -= 1
 
+    if confirmed_output is not None:
+        confirmed_output.update(confirmed)
     return output
 
 
@@ -596,6 +785,8 @@ def run_family(
     trace_fn: TraceFunction = probe_trace,
     target_mbps: int = 100,
     speed_probe_fn: SpeedProbeFunction | None = None,
+    rtt_probe_fn: RttProbeFunction | None = None,
+    candidate_gate: CandidateGateFunction | None = None,
 ) -> FamilyRunResult:
     started = time.perf_counter()
     if not snapshot.ips:
@@ -608,22 +799,47 @@ def run_family(
             raise NetworkChanged("测试期间网络出口发生变化")
 
     check()
-    pre_cache = _run_parallel_probes(
-        snapshot.ips,
-        params.pre_bytes,
-        3,
-        params.pre_concurrency,
-        f"并发连通快筛 {snapshot.family}",
-        cancel_event,
-        on_stage,
-        probe_fn,
-        include_trace=False,
-    )
+    if rtt_probe_fn is not None:
+        pre_cache = _run_parallel_rtt_rounds(
+            snapshot.ips,
+            3,
+            1.0,
+            params.pre_concurrency,
+            f"3 轮 TCP RTT 快筛 {snapshot.family}",
+            cancel_event,
+            on_stage,
+            rtt_probe_fn,
+        )
+    else:
+        # Test/embedding compatibility for callers that inject the historical
+        # HTTP probe but do not yet provide a TCP RTT function.
+        pre_cache = _run_parallel_probes(
+            snapshot.ips,
+            params.pre_bytes,
+            3,
+            params.pre_concurrency,
+            f"并发连通快筛 {snapshot.family}",
+            cancel_event,
+            on_stage,
+            probe_fn,
+            include_trace=False,
+        )
     pre_ranked = [
         ip for ip in _pre_rank(snapshot.ips, pre_cache, {}, False)
         if pre_cache.get(ip, ProbeResult(False)).ok
     ]
-    speed_ips = pre_ranked[: params.micro_candidates]
+    preferred = {
+        ip
+        for tag, values in snapshot.sources.items()
+        if "DNS" in tag or "我的 IP" in tag or "我的名单" in tag
+        for ip in values
+    }
+    speed_ips = _select_speed_candidates(
+        pre_ranked,
+        params.micro_candidates,
+        maximum=not params.early_stop,
+        preferred=preferred,
+    )
     log(
         f"{snapshot.family} 快筛完成：{len(pre_ranked)}/{len(snapshot.ips)} IP 可用；"
         f"按 TTFB/TCP 取前 {len(speed_ips)} 个做 1 秒吞吐"
@@ -657,6 +873,9 @@ def run_family(
         speed_worker = speed_probe_fn
 
     check()
+    gate_passed: set[str] = set()
+    gate_rejected: set[str] = set()
+    confirmed_ips: set[str] = set()
     full = _run_fast_speed_stage(
         speed_ips,
         params,
@@ -666,7 +885,13 @@ def run_family(
         log,
         speed_worker,
         snapshot.family,
+        candidate_gate=candidate_gate,
+        gate_passed=gate_passed,
+        gate_rejected=gate_rejected,
+        confirmed_output=confirmed_ips,
     )
+    # Do not publish a ranking measured across a changed client network.
+    check()
     pops: dict[str, str] = {}
     locs: dict[str, str] = {}
     for ip, samples in full.items():
@@ -675,6 +900,12 @@ def run_family(
             pops[ip] = chosen.colo
             locs[ip] = chosen.loc
 
+    metric_ips = [
+        ip
+        for ip in full
+        if ip in confirmed_ips
+        if (candidate_gate is None or ip in gate_passed)
+    ]
     metrics = [
         _metric(
             ip,
@@ -685,7 +916,7 @@ def run_family(
             locs,
             [tag for tag, values in snapshot.sources.items() if ip in values],
         )
-        for ip in full
+        for ip in metric_ips
     ]
     ranked = rank(metrics) if params.early_stop else rank_maximum(metrics)
     asia_ranked = rank_asia(metrics) if params.asia_hunt else ranked
@@ -701,7 +932,7 @@ def run_family(
         estimated_traffic_mb=actual_mb,
         elapsed_seconds=time.perf_counter() - started,
         candidate_count=len(snapshot.ips),
-        compatible_count=len(snapshot.ips),
+        compatible_count=len(snapshot.ips) if candidate_gate is None else len(gate_passed),
     )
 
 
@@ -740,6 +971,8 @@ def run_optimizer(
     target_mbps: int = 100,
     compatibility_fn: CompatibilityFunction | None = None,
     speed_probe_fn: SpeedProbeFunction | None = None,
+    candidate_seed: object | None = None,
+    rtt_probe_fn: RttProbeFunction | None = None,
 ) -> OptimizerResult:
     if mode not in MODES:
         raise ValueError(f"未知模式：{mode}")
@@ -761,10 +994,15 @@ def run_optimizer(
     logger = log or (lambda _message: None)
     supplied = load_ips(ips_path) if ips_path is not None else ips
     current_ips = list(resolved_ips) if resolved_ips is not None else resolver(target)
+    run_seed = candidate_seed if candidate_seed is not None else f"{time.time_ns()}:{threading.get_ident()}"
     if purpose == PURPOSE_ARGO:
-        candidates, rejected_count, actual_source, candidate_sources = _build_argo_candidates(supplied, current_ips, logger)
+        candidates, rejected_count, actual_source, candidate_sources = _build_argo_candidates(
+            supplied, current_ips, logger, run_seed
+        )
     elif purpose == PURPOSE_DIRECT:
-        candidates, rejected_count, actual_source, candidate_sources = _build_direct_candidates(supplied, current_ips, logger)
+        candidates, rejected_count, actual_source, candidate_sources = _build_direct_candidates(
+            supplied, current_ips, logger, run_seed
+        )
     else:
         candidates, rejected_count, verified_source = _filter_candidates(supplied, current_ips, logger)
         actual_source = source_kind if supplied is not None else verified_source
@@ -787,6 +1025,9 @@ def run_optimizer(
         probe_trace, hostname=measurement_host, port=measurement_port
     )
     worker_speed = speed_probe_fn
+    worker_rtt = rtt_probe_fn
+    if worker_rtt is None and probe_fn is None:
+        worker_rtt = functools.partial(probe_tcp_rtt, port=measurement_port)
     if worker_speed is None and probe_fn is None:
         worker_speed = functools.partial(
             probe_speed_window,
@@ -810,17 +1051,6 @@ def run_optimizer(
                 logger(f"{family_name} 没有可用候选地址，已跳过")
                 continue
             original_candidate_count = len(snapshot.ips)
-            if purpose == PURPOSE_ARGO:
-                snapshot, compatibility_rejected = validate_argo_snapshot(
-                    snapshot, cancel, stage_callback, logger, worker_compatibility
-                )
-                rejected_count += compatibility_rejected
-                if not snapshot.ips:
-                    logger(f"{family_name} 没有通过 Argo 域名兼容验证的候选地址，已跳过")
-                    family_results.append(
-                        FamilyRunResult(family_name, [], [], candidate_count=original_candidate_count, compatible_count=0)
-                    )
-                    continue
             logger(f"{family_name} 安全预计流量上限 ≈ {estimate_traffic_upper_bound_mb(snapshot, params, target_mbps):.1f} MB")
 
             def changed() -> bool:
@@ -830,6 +1060,22 @@ def run_optimizer(
                 return bool(before and after and before != after)
 
             try:
+                compatibility_cache: dict[str, bool] = {}
+
+                def candidate_gate(ip: str) -> bool:
+                    if ip in compatibility_cache:
+                        return compatibility_cache[ip]
+                    stage = f"Argo SNI/Host 兼容验证 {family_name}"
+                    stage_callback(stage, len(compatibility_cache), params.micro_candidates, ip)
+                    try:
+                        result = worker_compatibility(ip, 7, cancel)
+                    except Exception as exc:
+                        result = ProbeResult(ok=False, error=f"{type(exc).__name__}: {exc}", target_ip=ip)
+                    allowed = bool(result.ok and result.cert_verified and result.target_matches_remote)
+                    compatibility_cache[ip] = allowed
+                    stage_callback(stage, len(compatibility_cache), params.micro_candidates, ip)
+                    return allowed
+
                 family_result = run_family(
                     snapshot,
                     params,
@@ -841,9 +1087,22 @@ def run_optimizer(
                     trace_fn=worker_trace,
                     target_mbps=target_mbps,
                     speed_probe_fn=worker_speed,
+                    rtt_probe_fn=worker_rtt,
+                    candidate_gate=candidate_gate if purpose == PURPOSE_ARGO else None,
                 )
                 family_result.candidate_count = original_candidate_count
-                family_result.compatible_count = len(snapshot.ips)
+                if purpose == PURPOSE_ARGO:
+                    passed = sum(1 for allowed in compatibility_cache.values() if allowed)
+                    failed = len(compatibility_cache) - passed
+                    rejected_count += failed
+                    family_result.compatible_count = passed
+                    logger(
+                        f"{family_name} Argo 延后兼容验证：{passed}/{len(compatibility_cache)} 个复核候选通过"
+                    )
+                    if not passed:
+                        logger(f"{family_name} 入围地址均未通过 Argo 域名兼容验证")
+                else:
+                    family_result.compatible_count = len(snapshot.ips)
                 family_results.append(family_result)
             except NetworkChanged:
                 logger("!! 网络出口已变化，本轮结果作废")

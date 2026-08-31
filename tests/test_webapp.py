@@ -12,8 +12,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cfopt.cloudflare_dns import CloudflareDnsError, DnsSyncPlan, DnsSyncResult
-from cfopt.models import FamilyRunResult, IpMetric, OptimizerResult
-from cfopt.webapp import RuntimeState, _apply_dns_sync, _csv_bytes, _result_champions, make_handler
+from cfopt.models import MAX_BANDWIDTH, FamilyRunResult, IpMetric, OptimizerResult
+from cfopt.webapp import RuntimeState, _apply_dns_sync, _csv_bytes, _result_champions, _traffic_upper_bound_mb, make_handler
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -76,6 +76,19 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(body["default_node_port"], 443)
         self.assertEqual(body["target_mbps"]["default"], 100)
         self.assertGreater(body["max_custom_ips"], 0)
+        self.assertEqual(body["modes"]["max"]["micro_candidates"], 20)
+        self.assertEqual(body["modes"]["max"]["pre_concurrency"], 50)
+
+    def test_web_traffic_bound_covers_two_samples_for_every_shortlisted_ip(self) -> None:
+        expected = round(
+            (
+                100 * MAX_BANDWIDTH.pre_bytes
+                + 2 * MAX_BANDWIDTH.micro_candidates * 64_000_000
+            ) / 1_000_000.0,
+            1,
+        )
+        self.assertEqual(_traffic_upper_bound_mb("max", "ipv4", 100), expected)
+        self.assertEqual(_traffic_upper_bound_mb("max", "dual", 100), expected * 2)
 
     def test_dns_csv_does_not_emit_argo_node_parameters(self) -> None:
         family = FamilyRunResult(
@@ -203,7 +216,7 @@ class WebApiTest(unittest.TestCase):
             patch("cfopt.webapp._inspect_dns_sync") as inspect_sync,
         ):
             with self.assertRaises(urllib.error.HTTPError) as raised:
-                self._post("/api/dns/inspect", {**base, "ip": "104.16.0.2"})
+                self._post("/api/dns/inspect", {**base, "ip": "8.8.8.8"})
             self.assertEqual(raised.exception.code, 409)
             inspect_sync.assert_not_called()
 
@@ -246,6 +259,12 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(_result_champions(result), {})
         metric.success_rate_pct = 66.0
         metric.round_floor_mbps = 0
+        self.assertEqual(_result_champions(result), {})
+        metric.ip = "8.8.8.8"
+        metric.round_floor_mbps = 100.0
+        metric.rounds_tested = 2
+        self.assertEqual(_result_champions(result), {"IPv4": "8.8.8.8"})
+        metric.rounds_tested = 1
         self.assertEqual(_result_champions(result), {})
 
     def test_dns_inspect_then_apply_current_champion_without_token_leak(self) -> None:
@@ -582,6 +601,8 @@ class WebApiTest(unittest.TestCase):
         self.assertIn("data-winner-ip", script)
         self.assertIn("解析到我的域名（DNS-only）", script)
         self.assertIn("revealDnsSettings(target)", script)
+        self.assertIn('max: "最大带宽"', script)
+        self.assertNotIn('entry.mode === "asia" ? "亚洲狩猎" : "均衡模式"', script)
         self.assertNotIn("复制 Argo 参数", script)
         self.assertNotIn("rr-edge-hunter-cf-api-token", script)
 

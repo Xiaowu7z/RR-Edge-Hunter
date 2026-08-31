@@ -29,7 +29,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--node-port", type=int, default=443, help="仅用于 Argo 高级兼容复核；吞吐测速始终使用公共端点 443")
     run.add_argument("--ws-path", default="", help="可选 WebSocket 路径，例如 /vless")
     run.add_argument("--target-mbps", type=int, default=100, help="达标参考带宽，默认 100 Mbps")
-    run.add_argument("--ips", type=Path, help="可选 IP 名单；direct/Argo 模式作为官方池补充，DNS 模式用于交集筛选")
+    run.add_argument("--ips", type=Path, help="可选公网 IP 名单；direct/Argo 模式作为受限候选并须经严格 CF 身份复测，DNS 模式用于交集筛选")
     run.add_argument("--output", type=Path, default=Path("rr-edge-hunter-result.json"))
     run.add_argument("--csv", type=Path, help="额外导出 CSV")
     return parser

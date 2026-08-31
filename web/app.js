@@ -83,6 +83,10 @@ function selectedMode() {
   return currentValue("mode") || "asia";
 }
 
+function modeLabel(mode) {
+  return ({ asia: "亚洲狩猎", max: "最大带宽", balanced: "均衡模式" })[mode] || "均衡模式";
+}
+
 function currentPurpose() {
   return argoValidationEnabled.checked ? "argo" : "direct";
 }
@@ -134,8 +138,7 @@ function estimateTrafficMb(modeName, family) {
   const requestFloor = modeName === "max" ? 64_000_000 : 4_000_000;
   const requestBytes = Math.min(256_000_000, Math.max(requestFloor, Math.ceil(target * 125_000 * 1.5)));
   const shortlist = Math.min(cap, Number(mode.micro_candidates || 10));
-  const confirmations = Math.min(shortlist, Number(mode.final_candidates || 2));
-  return (cap * Number(mode.pre_bytes || 16000) + (shortlist + confirmations) * requestBytes) * families / 1_000_000;
+  return (cap * Number(mode.pre_bytes || 16000) + shortlist * 2 * requestBytes) * families / 1_000_000;
 }
 
 function formatDataAmountMb(value) {
@@ -323,7 +326,7 @@ async function loadHistory() {
       const date = new Date(entry.created_at || "");
       const created = Number.isNaN(date.getTime()) ? String(entry.created_at || "") : date.toLocaleString();
       const target = Number(entry.target_mbps || 100);
-      return `<article class="history-card"><div><small>${escapeHtml(created)}</small><strong>${entry.mode === "asia" ? "亚洲狩猎" : "均衡模式"} · ${escapeHtml(entry.operator || "自动")} · 目标 ${target} Mbps</strong></div><div class="history-champions">${champions.map((item) => `<button type="button" data-history-ip="${escapeHtml(item.row.ip)}"><span>${escapeHtml(item.family)}</span><b>${escapeHtml(item.row.ip)}</b><small>${formatMbps(item.row.round_floor_mbps)} · ${Number(item.row.round_floor_mbps || 0) >= target ? "达标" : "未达标"}</small></button>`).join("") || "<span>本轮无有效冠军</span>"}</div></article>`;
+      return `<article class="history-card"><div><small>${escapeHtml(created)}</small><strong>${escapeHtml(modeLabel(entry.mode))} · ${escapeHtml(entry.operator || "自动")} · 目标 ${target} Mbps</strong></div><div class="history-champions">${champions.map((item) => `<button type="button" data-history-ip="${escapeHtml(item.row.ip)}"><span>${escapeHtml(item.family)}</span><b>${escapeHtml(item.row.ip)}</b><small>${formatMbps(item.row.round_floor_mbps)} · ${Number(item.row.round_floor_mbps || 0) >= target ? "达标" : "未达标"}</small></button>`).join("") || "<span>本轮无有效冠军</span>"}</div></article>`;
     }).join("");
     historyRows.querySelectorAll("[data-history-ip]").forEach((button) => button.addEventListener("click", () => copyText(button.dataset.historyIp || "", "已复制历史冠军 IP")));
   } catch (error) {
@@ -388,7 +391,7 @@ async function applyParsed(result, sourceName, sourceSubscriptionUrl = "") {
   customIps = result.ips || [];
   loadedSubscriptionUrl = sourceSubscriptionUrl;
   const warnings = (result.warnings || []).join(" · ");
-  setCustomStatus(`${sourceName}：识别 ${customIps.length} 个公网 IP${warnings ? ` · ${warnings}` : ""}`, "ready");
+  setCustomStatus(`${sourceName}：识别 ${customIps.length} 个公网候选；外部地址须经严格 CF 身份复测${warnings ? ` · ${warnings}` : ""}`, "ready");
   showToast(`已载入 ${customIps.length} 个 IP`);
 }
 
