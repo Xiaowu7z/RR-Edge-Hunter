@@ -115,7 +115,7 @@ jobs:
           printf '%s\n\n%s\n\n%s\n' \
             "CF 优选IP Windows 正式版 1.0.0" \
             "构建提交：\`$GITHUB_SHA\`" \
-            "同时提供安装版与免安装便携版；包含直接 IP 优选、亚洲狩猎、IPv4/IPv6、定时运行，以及冠军 IP 同步到 Cloudflare A/AAAA 灰云记录。" \
+            "同时提供安装版与免安装便携版；包含快速真实下载测速、均衡/亚洲狩猎/最大带宽、IPv4/IPv6、定时运行，以及冠军 IP 同步到 Cloudflare A/AAAA 灰云记录。" \
             > "$NOTES_FILE"
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
