@@ -22,7 +22,7 @@ def _parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="在命令行执行独立 CF IP 优选、Argo 高级复核或 DNS 体检")
     run.add_argument("--purpose", choices=("direct", "argo", "dns"), default="direct", help="direct=独立 CF IP 优选；argo=附加域名兼容复核；dns=当前 DNS 快速体检")
-    run.add_argument("--mode", choices=("balanced", "asia"), default="asia")
+    run.add_argument("--mode", choices=("balanced", "asia", "max"), default="asia")
     run.add_argument("--family", choices=("ipv4", "ipv6", "dual"), default="ipv4")
     run.add_argument("--operator", default="自动", help="仅作为当前线路标签记录")
     run.add_argument("--target-host", default=SPEED_HOST, help="仅 Argo 高级复核或 DNS 体检使用；direct 模式固定使用 Cloudflare 公共测速端点")

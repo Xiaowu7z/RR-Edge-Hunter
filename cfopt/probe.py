@@ -277,6 +277,143 @@ def probe_trace(
         return "", ""
 
 
+def speed_request_bytes(target_mbps: int, maximum: bool = False) -> int:
+    """Bound one throughput sample without tying its duration to line speed."""
+    target = max(1, int(target_mbps))
+    floor = 64_000_000 if maximum else 4_000_000
+    return min(256_000_000, max(floor, int(target * 125_000 * 1.5)))
+
+
+def _cloudflare_colo(headers: dict[str, str]) -> str:
+    ray = headers.get("cf-ray", "").strip()
+    if not ray:
+        return ""
+    suffix = ray.rsplit("-", 1)[-1].upper()
+    return suffix if re.fullmatch(r"[A-Z0-9]{3,5}", suffix) else ""
+
+
+def probe_speed_window(
+    target_ip: str,
+    target_mbps: int,
+    sample_seconds: float = 1.0,
+    timeout_sec: int = 5,
+    cancel_event: threading.Event | None = None,
+    log: Callable[[str], None] | None = None,
+    hostname: str = SPEED_HOST,
+    port: int = 443,
+    maximum: bool = False,
+) -> ProbeResult:
+    """Measure a pinned Cloudflare IP for a short, bounded HTTPS window.
+
+    The system trust store, SNI and hostname verification remain enabled.  A
+    result is accepted only when the socket peer is the requested IP and the
+    response carries Cloudflare's CF-RAY identity header.
+    """
+    cancel = cancel_event or threading.Event()
+    logger = log or (lambda _message: None)
+    requested = speed_request_bytes(target_mbps, maximum)
+    target_ip = normalized_ip(target_ip)
+    family, address = _socket_address(target_ip, port)
+    connect_started = time.perf_counter()
+    absolute_deadline = time.monotonic() + max(1.0, float(timeout_sec)) + max(0.25, sample_seconds) + 2.0
+    raw = socket.socket(family, socket.SOCK_STREAM)
+    stream: ssl.SSLSocket | None = None
+    try:
+        if cancel.is_set():
+            raise ProbeCancelled("已取消")
+        raw.settimeout(float(timeout_sec))
+        raw.connect(address)
+        connected = time.perf_counter()
+        context = ssl.create_default_context()
+        stream = context.wrap_socket(raw, server_hostname=hostname, do_handshake_on_connect=False)
+        stream.settimeout(float(timeout_sec))
+        stream.do_handshake()
+        tls_done = time.perf_counter()
+        remote = normalized_ip(stream.getpeername()[0])
+        request = (
+            f"GET /__down?bytes={requested} HTTP/1.1\r\n"
+            f"Host: {hostname}\r\n"
+            "User-Agent: RR-Edge-Hunter/1.0\r\n"
+            "Accept: */*\r\n"
+            "Accept-Encoding: identity\r\n"
+            "Cache-Control: no-store\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode("ascii")
+        stream.sendall(request)
+        head, initial, first_byte_at = _read_headers(stream, cancel, absolute_deadline)
+        status, version, headers = _parse_head(head)
+        body_started = time.perf_counter()
+        sample_deadline = time.monotonic() + max(0.25, min(float(sample_seconds), 3.0))
+        downloaded = min(len(initial), requested)
+        while downloaded < requested:
+            if cancel.is_set():
+                raise ProbeCancelled("已取消")
+            remaining = sample_deadline - time.monotonic()
+            if remaining <= 0.0:
+                break
+            stream.settimeout(min(0.25, remaining))
+            try:
+                chunk = stream.recv(min(64 * 1024, requested - downloaded))
+            except socket.timeout:
+                continue
+            if not chunk:
+                break
+            downloaded += len(chunk)
+        body_done = time.perf_counter()
+        target_matches = ipaddress.ip_address(target_ip) == ipaddress.ip_address(remote)
+        colo = _cloudflare_colo(headers)
+        body_seconds = max(body_done - body_started, 0.001)
+        enough = downloaded >= min(32_768, requested)
+        ok = 200 <= status <= 399 and target_matches and bool(colo) and enough
+        error = ""
+        if not target_matches:
+            error = f"实际连接地址不一致：{remote}"
+        elif not 200 <= status <= 399:
+            error = f"HTTP {status}"
+        elif not colo:
+            error = "响应缺少有效 CF-RAY，无法确认 Cloudflare 边缘"
+        elif not enough:
+            error = f"测速数据不足：{downloaded} 字节"
+        payload_mbps = downloaded * 8.0 / body_seconds / 1_000_000.0 if ok else 0.0
+        return ProbeResult(
+            ok=ok,
+            error=error,
+            family=family_of(remote) or "未知",
+            target_ip=target_ip,
+            actual_remote_address=remote,
+            target_matches_remote=target_matches,
+            remote_is_ipv6=":" in remote,
+            sni=hostname,
+            cert_verified=True,
+            http_code=status,
+            http_version=version,
+            tcp_ms=(connected - connect_started) * 1000.0,
+            tls_ms=(tls_done - connected) * 1000.0,
+            ttfb_ms=(first_byte_at - connect_started) * 1000.0,
+            body_ms=body_seconds * 1000.0,
+            total_ms=(body_done - connect_started) * 1000.0,
+            bytes_downloaded=downloaded,
+            bytes_target=requested,
+            payload_mbps=payload_mbps,
+            complete_mbps=payload_mbps,
+            colo=colo,
+        )
+    except ProbeCancelled:
+        return ProbeResult(ok=False, error="已取消", target_ip=target_ip, bytes_target=requested)
+    except (OSError, ValueError, TimeoutError, EOFError, ssl.SSLError) as exc:
+        message = f"{type(exc).__name__}: {str(exc)[:100]}"
+        logger(f"{target_ip} 1 秒测速失败：{message}")
+        return ProbeResult(ok=False, error=message, target_ip=target_ip, bytes_target=requested)
+    finally:
+        try:
+            if stream is not None:
+                stream.close()
+            else:
+                raw.close()
+        except OSError:
+            pass
+
+
 def probe_download(
     target_ip: str,
     bytes_target: int,
@@ -313,10 +450,11 @@ def probe_download(
             error = f"下载不完整：{downloaded}/{bytes_target}（<80%）"
         payload_mbps = downloaded * 8.0 / result.body_ms / 1000.0 if ok and result.body_ms > 0.0 else 0.0
         complete_mbps = downloaded * 8.0 / result.total_ms / 1000.0 if ok and result.total_ms > 0.0 else 0.0
-        colo = ""
+        colo = _cloudflare_colo(result.headers)
         loc = ""
         if ok and include_trace and not cancel.is_set():
-            colo, loc = probe_trace(target_ip, timeout_sec, cancel, hostname, port)
+            trace_colo, loc = probe_trace(target_ip, timeout_sec, cancel, hostname, port)
+            colo = trace_colo or colo
         return ProbeResult(
             ok=ok,
             error=error,

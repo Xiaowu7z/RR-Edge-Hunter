@@ -23,36 +23,55 @@ class ModeParams:
     micro_concurrency: int
     full_concurrency: int = 1
     asia_hunt: bool = False
+    early_stop: bool = True
 
 
 BALANCED = ModeParams(
     name="balanced",
     label="均衡模式",
-    pre_bytes=96_000,
-    micro_bytes=1_000_000,
-    full_bytes=8_000_000,
+    pre_bytes=16_000,
+    micro_bytes=0,
+    full_bytes=0,
     full_rounds=2,
-    micro_candidates=80,
-    final_candidates=20,
-    pre_concurrency=8,
-    micro_concurrency=6,
+    micro_candidates=10,
+    final_candidates=2,
+    pre_concurrency=32,
+    micro_concurrency=1,
 )
 
 ASIA_HUNT = ModeParams(
     name="asia",
     label="亚洲狩猎",
-    pre_bytes=64_000,
-    micro_bytes=750_000,
-    full_bytes=8_000_000,
-    full_rounds=3,
-    micro_candidates=160,
-    final_candidates=48,
-    pre_concurrency=10,
-    micro_concurrency=8,
+    pre_bytes=16_000,
+    micro_bytes=0,
+    full_bytes=0,
+    full_rounds=2,
+    micro_candidates=10,
+    final_candidates=3,
+    pre_concurrency=32,
+    micro_concurrency=1,
     asia_hunt=True,
 )
 
-MODES = {BALANCED.name: BALANCED, ASIA_HUNT.name: ASIA_HUNT}
+MAX_BANDWIDTH = ModeParams(
+    name="max",
+    label="最大带宽",
+    pre_bytes=16_000,
+    micro_bytes=0,
+    full_bytes=0,
+    full_rounds=2,
+    micro_candidates=10,
+    final_candidates=3,
+    pre_concurrency=32,
+    micro_concurrency=1,
+    early_stop=False,
+)
+
+MODES = {
+    BALANCED.name: BALANCED,
+    ASIA_HUNT.name: ASIA_HUNT,
+    MAX_BANDWIDTH.name: MAX_BANDWIDTH,
+}
 
 
 @dataclass

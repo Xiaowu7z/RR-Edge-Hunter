@@ -2,7 +2,7 @@
 
 **CF 优选 IP · 电脑端**
 
-RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默认不需要填写域名：应用把 `speed.cloudflare.com` 固定到每个候选 IP 的 `443` 端口，保留严格 TLS 证书、SNI 与 Host 校验，再通过分层、多轮真实下载找出当前网络更快、更稳定的入口。
+RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默认不需要填写域名：应用把 `speed.cloudflare.com` 固定到每个候选 IP 的 `443` 端口，保留严格 TLS 证书、SNI、Host、CF-RAY 与真实 socket 对端校验，再通过“并发快筛 + 前 10 名一秒吞吐 + 达标复测早停”找出当前网络更快、更稳定的入口。
 
 优选结果是一个裸 IPv4 或 IPv6。把它填入 VMess / VLESS 等节点的 `address` 或 `server` 字段即可；节点原来的端口、UUID、协议、TLS SNI、HTTP Host、WS Path 等参数全部保持不变。
 
@@ -19,7 +19,7 @@ RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默�
 | 候选来源 | Cloudflare 官方池；可叠加用户导入的官方 IP |
 | 输出用途 | 只替换节点 `address/server` |
 
-亚洲狩猎仍以成功率、复核底线、最低与平均吞吐和波动为主；HKG、NRT、SIN、ICN、TPE 等 POP 只在成绩接近时加分，不会让明显更慢的亚洲入口排到高速稳定入口之前。
+亚洲狩猎仍以成功率、复核底线、最低与平均吞吐和波动为主；HKG、NRT、SIN、ICN、TPE 等 POP 只在成绩接近时加分，不会让明显更慢的亚洲入口排到高速稳定入口之前。均衡与亚洲狩猎在达到期望带宽并复测通过后立即停止；“最大带宽”会测完入围的前 10 个 IP，并复测最快的前 3 个，适合寻找当前线路的下载极限。
 
 ## 下载与运行
 
@@ -47,11 +47,11 @@ RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默�
 
 ## 工作方式
 
-1. 获取 `speed.cloudflare.com` 当前 DNS 种子，并加载 Cloudflare 官方 CIDR 的确定性受控抽样。
+1. 获取 `speed.cloudflare.com` 当前 DNS 种子，并加载 Cloudflare 官方 CIDR 的受控分散抽样；每个协议族最多保留 100 个候选。
 2. 如用户导入名单，将其中属于 Cloudflare 官方网段的地址加入候选；非 CF 地址不会进入默认测试池。
-3. 固定 `speed.cloudflare.com:443` 到每个候选 IP，保留系统证书验证、TLS SNI、HTTP Host 与真实 TCP 对端校验。
-4. 执行 Pre 快筛、Micro 复核和多轮 Full 下载；失败轮次按 `0 Mbps` 纳入稳定性与可靠下限。
-5. 按成功率、复核底线、最低/平均吞吐、波动、TTFB 排名，并标注是否达到用户设定的带宽目标。
+3. 用最多 32 路并发执行小流量 HTTPS 快筛，固定候选 IP，并严格核对系统证书、TLS SNI、HTTP Host、CF-RAY 与真实 TCP 对端。
+4. 按 TTFB/TCP 从可用候选中取前 10 名，逐个执行约 1 秒的有界吞吐测试。均衡/亚洲狩猎达到目标后复测一次并早停；最大带宽则测完前 10 名并复测最快的前 3 名。
+5. 按成功率、复测底线、最低/平均吞吐、波动、TTFB 排名，并标注是否达到用户设定的带宽目标。
 
 默认模式测的是“用户当前网络到 Cloudflare 入口”的质量，不需要知道 VPS 源站 IP，也不会更改节点配置。
 

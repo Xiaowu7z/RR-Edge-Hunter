@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from cfopt.probe import probe_argo_compatibility
+from cfopt.probe import probe_argo_compatibility, probe_speed_window, speed_request_bytes
 
 
 class _FakeRawSocket:
@@ -44,6 +44,9 @@ class _FakeTlsStream:
 
     def sendall(self, payload: bytes) -> None:
         self.sent += payload
+
+    def recv(self, _size: int) -> bytes:
+        return b""
 
     def close(self) -> None:
         self.closed = True
@@ -155,6 +158,58 @@ class ArgoProbeTest(unittest.TestCase):
                 "104.16.0.9", hostname="argo.example.com", ws_path="/vless"
             )
         self.assertFalse(result.ok)
+
+    def test_one_second_speed_probe_keeps_tls_peer_and_cf_identity_checks(self) -> None:
+        raw = _FakeRawSocket()
+        stream = _FakeTlsStream()
+        context = _FakeContext(stream)
+
+        def headers(_stream, _cancel, _deadline):
+            return (
+                b"HTTP/1.1 200 OK\r\nCF-RAY: 0123456789abcdef-LAX\r\nContent-Length: 4000000",
+                b"x" * 32_768,
+                time.perf_counter(),
+            )
+
+        with (
+            patch("cfopt.probe.socket.socket", return_value=raw),
+            patch("cfopt.probe.ssl.create_default_context", return_value=context) as default_context,
+            patch("cfopt.probe._read_headers", side_effect=headers),
+        ):
+            result = probe_speed_window("104.16.0.9", 100, sample_seconds=0.25)
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.cert_verified)
+        self.assertTrue(result.target_matches_remote)
+        self.assertEqual(result.colo, "LAX")
+        self.assertEqual(context.server_hostname, "speed.cloudflare.com")
+        self.assertIn(f"/__down?bytes={speed_request_bytes(100)}", stream.sent.decode("ascii"))
+        default_context.assert_called_once_with()
+
+    def test_speed_probe_rejects_response_without_cf_ray(self) -> None:
+        raw = _FakeRawSocket()
+        stream = _FakeTlsStream()
+        context = _FakeContext(stream)
+        with (
+            patch("cfopt.probe.socket.socket", return_value=raw),
+            patch("cfopt.probe.ssl.create_default_context", return_value=context),
+            patch(
+                "cfopt.probe._read_headers",
+                return_value=(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 4000000",
+                    b"x" * 32_768,
+                    time.perf_counter(),
+                ),
+            ),
+        ):
+            result = probe_speed_window("104.16.0.9", 100, sample_seconds=0.25)
+        self.assertFalse(result.ok)
+        self.assertIn("CF-RAY", result.error)
+
+    def test_speed_request_is_bounded_and_max_mode_uses_longer_sample(self) -> None:
+        self.assertEqual(speed_request_bytes(100), 18_750_000)
+        self.assertEqual(speed_request_bytes(100, maximum=True), 64_000_000)
+        self.assertLessEqual(speed_request_bytes(10_000, maximum=True), 256_000_000)
 
     def test_certificate_failure_and_unsafe_path_are_never_bypassed(self) -> None:
         raw = _FakeRawSocket()

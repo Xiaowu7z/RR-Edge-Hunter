@@ -16,7 +16,7 @@ from typing import Callable, Iterable
 from .hostnames import HostnameError, normalize_hostname
 from .ip_sources import MAX_SOURCE_BYTES, IpSourceError, decode_ip_source_bytes, normalize_ip_values, parse_ip_source
 from .models import ASIA_HUNT, BALANCED, MODES, FamilyRunResult, IpMetric, ModeParams, OptimizerResult, PopDiscovery, ProbeResult, Snapshot, SPEED_HOST
-from .probe import probe_argo_compatibility, probe_download, probe_trace
+from .probe import probe_argo_compatibility, probe_download, probe_speed_window, probe_trace, speed_request_bytes
 from .ranges import family_of, is_cloudflare_ip, normalized_ip, prefix_of, sample_official_cloudflare_ips
 from .ranking import address_floor, median_ttfb, rank, rank_asia, stability_label, success_rate, variation
 
@@ -24,13 +24,14 @@ from .ranking import address_floor, median_ttfb, rank, rank_asia, stability_labe
 StageCallback = Callable[[str, int, int, str], None]
 LogCallback = Callable[[str], None]
 ProbeFunction = Callable[..., ProbeResult]
+SpeedProbeFunction = Callable[..., ProbeResult]
 TraceFunction = Callable[..., tuple[str, str]]
 CompatibilityFunction = Callable[..., ProbeResult]
 ResolveFunction = Callable[[str], list[str]]
 
 ASIA_POP_ORDER = ("HKG", "NRT", "SIN", "ICN", "TPE")
 POP_PRIORITY = {"HKG": 5, "NRT": 4, "SIN": 3, "ICN": 2, "TPE": 1}
-MAX_CANDIDATES_PER_FAMILY = 128
+MAX_CANDIDATES_PER_FAMILY = 100
 PURPOSE_DIRECT = "direct"
 PURPOSE_ARGO = "argo"
 PURPOSE_DNS = "dns"
@@ -316,11 +317,16 @@ def full_schedule(ips: list[str], full_rounds: int) -> list[str]:
     return [ip for ip in ips for _ in range(max(1, full_rounds))]
 
 
-def estimate_traffic_upper_bound_mb(snapshot: Snapshot, params: ModeParams) -> float:
-    pre = len(snapshot.ips) * params.pre_bytes
-    micro = min(len(snapshot.ips), params.micro_candidates) * params.micro_bytes
-    full = min(len(snapshot.ips), params.final_candidates) * params.full_rounds * params.full_bytes
-    return (pre + micro + full) / 1_000_000.0
+def estimate_traffic_upper_bound_mb(
+    snapshot: Snapshot,
+    params: ModeParams,
+    target_mbps: int = 100,
+) -> float:
+    gate = len(snapshot.ips) * params.pre_bytes
+    shortlist = min(len(snapshot.ips), params.micro_candidates)
+    confirmations = min(shortlist, params.final_candidates)
+    per_sample = speed_request_bytes(target_mbps, maximum=not params.early_stop)
+    return (gate + (shortlist + confirmations) * per_sample) / 1_000_000.0
 
 
 def network_fingerprint() -> tuple[str, str]:
@@ -429,8 +435,9 @@ def _pre_rank(ips: list[str], cache: dict[str, ProbeResult], pops: dict[str, str
         pop = pop_priority(pops.get(ip, ""))
         performance: tuple[object, ...] = (
             0 if result.ok else 1,
-            -result.complete_mbps if result.ok else 0.0,
             result.ttfb_ms if result.ttfb_ms >= 0.0 else float("inf"),
+            result.tcp_ms if result.tcp_ms >= 0.0 else float("inf"),
+            -result.complete_mbps if result.ok else 0.0,
         )
         # Asian POP is a same-performance preference, never a reason to keep a
         # much slower address ahead of a stable high-throughput candidate.
@@ -468,6 +475,74 @@ def _run_full_rounds(
                 output[ip].append(ProbeResult(ok=False, error=f"{type(exc).__name__}: {exc}", target_ip=ip))
             completed += 1
             on_stage(stage, completed, len(schedule), ip)
+    return output
+
+
+def _run_fast_speed_stage(
+    ips: list[str],
+    params: ModeParams,
+    target_mbps: int,
+    cancel_event: threading.Event,
+    on_stage: StageCallback,
+    log: LogCallback,
+    speed_probe_fn: SpeedProbeFunction,
+    family: str,
+) -> dict[str, list[ProbeResult]]:
+    """Run one-second samples sequentially and stop once a result is confirmed."""
+    output: dict[str, list[ProbeResult]] = {}
+    confirmed: set[str] = set()
+    completed = 0
+    maximum = not params.early_stop
+    total = len(ips) + min(len(ips), params.final_candidates)
+    stage = f"1 秒吞吐测速 {family}"
+    on_stage(stage, 0, total, "全部测速" if maximum else f"达到 {target_mbps} Mbps 后复测并早停")
+
+    def once(ip: str) -> ProbeResult:
+        nonlocal completed
+        _cancelled(cancel_event)
+        try:
+            result = speed_probe_fn(ip, target_mbps, 1.0, 5, cancel_event)
+        except Exception as exc:
+            result = ProbeResult(ok=False, error=f"{type(exc).__name__}: {exc}", target_ip=ip)
+        completed += 1
+        on_stage(stage, completed, total, ip)
+        return result
+
+    early_winner = ""
+    tested: list[str] = []
+    for ip in ips:
+        first = once(ip)
+        output[ip] = [first]
+        tested.append(ip)
+        if params.early_stop and first.ok and first.complete_mbps >= target_mbps:
+            second = once(ip)
+            output[ip].append(second)
+            confirmed.add(ip)
+            if second.ok and min(first.complete_mbps, second.complete_mbps) >= target_mbps:
+                early_winner = ip
+                log(f"{family} {ip} 两次 1 秒实测均达到 {target_mbps} Mbps，提前结束")
+                break
+
+    if not early_winner:
+        ranked_first = sorted(
+            (ip for ip in tested if output[ip][0].ok),
+            key=lambda ip: (
+                -output[ip][0].complete_mbps,
+                -output[ip][0].payload_mbps,
+                output[ip][0].ttfb_ms if output[ip][0].ttfb_ms >= 0 else float("inf"),
+                ip,
+            ),
+        )
+        needed = max(0, params.final_candidates - len(confirmed))
+        for ip in ranked_first:
+            if needed <= 0:
+                break
+            if ip in confirmed:
+                continue
+            output[ip].append(once(ip))
+            confirmed.add(ip)
+            needed -= 1
+
     return output
 
 
@@ -518,6 +593,8 @@ def run_family(
     network_changed: Callable[[], bool] | None = None,
     probe_fn: ProbeFunction = probe_download,
     trace_fn: TraceFunction = probe_trace,
+    target_mbps: int = 100,
+    speed_probe_fn: SpeedProbeFunction | None = None,
 ) -> FamilyRunResult:
     started = time.perf_counter()
     if not snapshot.ips:
@@ -529,59 +606,98 @@ def run_family(
         if guard():
             raise NetworkChanged("测试期间网络出口发生变化")
 
-    discovery: PopDiscovery | None = None
+    check()
+    pre_cache = _run_parallel_probes(
+        snapshot.ips,
+        params.pre_bytes,
+        3,
+        params.pre_concurrency,
+        f"并发连通快筛 {snapshot.family}",
+        cancel_event,
+        on_stage,
+        probe_fn,
+        include_trace=False,
+    )
+    pre_ranked = [
+        ip for ip in _pre_rank(snapshot.ips, pre_cache, {}, False)
+        if pre_cache.get(ip, ProbeResult(False)).ok
+    ]
+    speed_ips = pre_ranked[: params.micro_candidates]
+    log(
+        f"{snapshot.family} 快筛完成：{len(pre_ranked)}/{len(snapshot.ips)} IP 可用；"
+        f"按 TTFB/TCP 取前 {len(speed_ips)} 个做 1 秒吞吐"
+    )
+    if not speed_ips:
+        return FamilyRunResult(
+            snapshot.family,
+            [],
+            [],
+            elapsed_seconds=time.perf_counter() - started,
+            candidate_count=len(snapshot.ips),
+            compatible_count=len(snapshot.ips),
+        )
+
+    if speed_probe_fn is None:
+        def speed_worker(
+            ip: str,
+            expected: int,
+            _window: float,
+            timeout: int,
+            cancel: threading.Event,
+        ) -> ProbeResult:
+            return probe_fn(
+                ip,
+                speed_request_bytes(expected, maximum=not params.early_stop),
+                timeout,
+                True,
+                cancel,
+            )
+    else:
+        speed_worker = speed_probe_fn
+
+    check()
+    full = _run_fast_speed_stage(
+        speed_ips,
+        params,
+        target_mbps,
+        cancel_event,
+        on_stage,
+        log,
+        speed_worker,
+        snapshot.family,
+    )
     pops: dict[str, str] = {}
     locs: dict[str, str] = {}
-    if params.asia_hunt:
-        check()
-        discovery = _discover_pops(snapshot, cancel_event, on_stage, log, trace_fn)
-        pops, locs = discovery.ip_to_pop, discovery.ip_to_loc
+    for ip, samples in full.items():
+        chosen = next((item for item in reversed(samples) if item.ok), None)
+        if chosen is not None:
+            pops[ip] = chosen.colo
+            locs[ip] = chosen.loc
 
-    check()
-    pre_cache = _run_parallel_probes(snapshot.ips, params.pre_bytes, 8, params.pre_concurrency, f"初筛 {snapshot.family}", cancel_event, on_stage, probe_fn)
-    for ip, result in pre_cache.items():
-        result.colo = result.colo or pops.get(ip, "")
-        result.loc = result.loc or locs.get(ip, "")
-    pre_ranked = _pre_rank(snapshot.ips, pre_cache, pops, params.asia_hunt)
-    micro_ips = pre_ranked[: params.micro_candidates]
-    log(f"{snapshot.family} 初筛完成：{sum(1 for item in pre_cache.values() if item.ok)}/{len(snapshot.ips)} IP 可用；进入小流量复核 {len(micro_ips)} 个")
-
-    check()
-    micro_cache = _run_parallel_probes(micro_ips, params.micro_bytes, 12, params.micro_concurrency, f"小流量复核 {snapshot.family}", cancel_event, on_stage, probe_fn)
-    for ip, result in micro_cache.items():
-        result.colo = result.colo or pops.get(ip, "")
-        result.loc = result.loc or locs.get(ip, "")
-    final_ranked = _pre_rank(micro_ips, micro_cache, pops, params.asia_hunt)[: params.final_candidates]
-    log(f"{snapshot.family} 小流量复核完成：进入完整复核 {len(final_ranked)} 个")
-
-    check()
-    full = _run_full_rounds(final_ranked, params, cancel_event, on_stage, probe_fn, snapshot.family)
     metrics = [
         _metric(
             ip,
             snapshot.family,
             full.get(ip, []),
-            micro_cache.get(ip),
+            pre_cache.get(ip),
             pops,
             locs,
             [tag for tag, values in snapshot.sources.items() if ip in values],
         )
-        for ip in final_ranked
+        for ip in full
     ]
     ranked = rank(metrics)
     asia_ranked = rank_asia(metrics) if params.asia_hunt else ranked
-    estimated = (
-        len(snapshot.ips) * params.pre_bytes
-        + len(micro_ips) * params.micro_bytes
-        + len(final_ranked) * params.full_rounds * params.full_bytes
-    ) / 1_000_000.0
-    log(f"{snapshot.family} 完整复核完成：{len(metrics)} 个 IP；实际计划流量约 {estimated:.1f} MB")
+    actual_bytes = sum(item.bytes_downloaded for item in pre_cache.values())
+    actual_bytes += sum(item.bytes_downloaded for samples in full.values() for item in samples)
+    actual_mb = actual_bytes / 1_000_000.0
+    log(f"{snapshot.family} 测速完成：实测 {len(metrics)} 个 IP；实际下载约 {actual_mb:.1f} MB")
     return FamilyRunResult(
         family=snapshot.family,
         ranked=ranked,
         asia_ranked=asia_ranked,
-        discovery=discovery,
-        estimated_traffic_mb=estimated,
+        discovery=None,
+        estimated_traffic_mb=actual_mb,
         elapsed_seconds=time.perf_counter() - started,
         candidate_count=len(snapshot.ips),
         compatible_count=len(snapshot.ips),
@@ -622,6 +738,7 @@ def run_optimizer(
     ws_path: str = "",
     target_mbps: int = 100,
     compatibility_fn: CompatibilityFunction | None = None,
+    speed_probe_fn: SpeedProbeFunction | None = None,
 ) -> OptimizerResult:
     if mode not in MODES:
         raise ValueError(f"未知模式：{mode}")
@@ -668,6 +785,14 @@ def run_optimizer(
     worker_trace = trace_fn or functools.partial(
         probe_trace, hostname=measurement_host, port=measurement_port
     )
+    worker_speed = speed_probe_fn
+    if worker_speed is None and probe_fn is None:
+        worker_speed = functools.partial(
+            probe_speed_window,
+            hostname=measurement_host,
+            port=measurement_port,
+            maximum=not params.early_stop,
+        )
     worker_compatibility = compatibility_fn or functools.partial(
         probe_argo_compatibility,
         hostname=target,
@@ -695,7 +820,7 @@ def run_optimizer(
                         FamilyRunResult(family_name, [], [], candidate_count=original_candidate_count, compatible_count=0)
                     )
                     continue
-            logger(f"{family_name} 安全预计流量上限 ≈ {estimate_traffic_upper_bound_mb(snapshot, params):.1f} MB")
+            logger(f"{family_name} 安全预计流量上限 ≈ {estimate_traffic_upper_bound_mb(snapshot, params, target_mbps):.1f} MB")
 
             def changed() -> bool:
                 current = network_fingerprint()
@@ -704,7 +829,18 @@ def run_optimizer(
                 return bool(before and after and before != after)
 
             try:
-                family_result = run_family(snapshot, params, cancel, stage_callback, logger, changed, worker_probe, worker_trace)
+                family_result = run_family(
+                    snapshot,
+                    params,
+                    cancel,
+                    stage_callback,
+                    logger,
+                    network_changed=changed,
+                    probe_fn=worker_probe,
+                    trace_fn=worker_trace,
+                    target_mbps=target_mbps,
+                    speed_probe_fn=worker_speed,
+                )
                 family_result.candidate_count = original_candidate_count
                 family_result.compatible_count = len(snapshot.ips)
                 family_results.append(family_result)

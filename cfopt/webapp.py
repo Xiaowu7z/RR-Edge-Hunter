@@ -477,12 +477,18 @@ def _csv_bytes(result: OptimizerResult) -> bytes:
     return output.getvalue().encode("utf-8-sig")
 
 
-def _traffic_upper_bound_mb(mode: str, family: str) -> float:
+def _traffic_upper_bound_mb(mode: str, family: str, target_mbps: int = 100) -> float:
     params = MODES[mode]
+    shortlist = min(MAX_CANDIDATES_PER_FAMILY, params.micro_candidates)
+    confirmations = min(shortlist, params.final_candidates)
+    request_floor = 64_000_000 if not params.early_stop else 4_000_000
+    request_bytes = min(
+        256_000_000,
+        max(request_floor, int(max(1, target_mbps) * 125_000 * 1.5)),
+    )
     per_family = (
         MAX_CANDIDATES_PER_FAMILY * params.pre_bytes
-        + min(MAX_CANDIDATES_PER_FAMILY, params.micro_candidates) * params.micro_bytes
-        + min(MAX_CANDIDATES_PER_FAMILY, params.final_candidates) * params.full_rounds * params.full_bytes
+        + (shortlist + confirmations) * request_bytes
     ) / 1_000_000.0
     return round(per_family * (2 if family == "dual" else 1), 1)
 
@@ -612,7 +618,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 "node_port": node_port,
                 "ws_path": ws_path,
                 "target_mbps": target_mbps,
-                "traffic_upper_bound_mb": _traffic_upper_bound_mb(mode, family),
+                "traffic_upper_bound_mb": _traffic_upper_bound_mb(mode, family, target_mbps),
             }
             if source == "custom":
                 values = body.get("ips")
@@ -690,6 +696,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                             "micro_bytes": mode.micro_bytes,
                             "full_bytes": mode.full_bytes,
                             "full_rounds": mode.full_rounds,
+                            "early_stop": mode.early_stop,
                         }
                         for name, mode in MODES.items()
                     },

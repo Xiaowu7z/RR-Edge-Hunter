@@ -121,15 +121,21 @@ function updatePoolHint(config) {
   const mode = config.modes?.[selectedMode()];
   if (!mode) return;
   const cap = config.candidate_cap_per_family ? ` · 每族上限 ${config.candidate_cap_per_family}` : "";
-  poolCount.textContent = `Micro ${mode.micro_candidates} · Full ${mode.final_candidates} × ${mode.full_rounds}${cap}`;
+  const stop = mode.early_stop === false ? "全部测速" : "达标早停";
+  poolCount.textContent = `并发快筛 ${cap} · 1 秒测速前 ${mode.micro_candidates} · 复测前 ${mode.final_candidates} · ${stop}`;
 }
 
 function estimateTrafficMb(modeName, family) {
   const mode = window.rrConfig?.modes?.[modeName];
   if (!mode) return null;
   const families = family === "dual" ? 2 : 1;
-  const cap = Number(window.rrConfig?.candidate_cap_per_family || 128);
-  return (cap * mode.pre_bytes + Math.min(cap, mode.micro_candidates) * mode.micro_bytes + Math.min(cap, mode.final_candidates) * mode.full_rounds * mode.full_bytes) * families / 1_000_000;
+  const cap = Number(window.rrConfig?.candidate_cap_per_family || 100);
+  const target = Math.max(1, Math.min(10000, Number(targetMbps.value || 100)));
+  const requestFloor = modeName === "max" ? 64_000_000 : 4_000_000;
+  const requestBytes = Math.min(256_000_000, Math.max(requestFloor, Math.ceil(target * 125_000 * 1.5)));
+  const shortlist = Math.min(cap, Number(mode.micro_candidates || 10));
+  const confirmations = Math.min(shortlist, Number(mode.final_candidates || 2));
+  return (cap * Number(mode.pre_bytes || 16000) + (shortlist + confirmations) * requestBytes) * families / 1_000_000;
 }
 
 function formatDataAmountMb(value) {

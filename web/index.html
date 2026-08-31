@@ -53,8 +53,9 @@
         <fieldset>
           <legend><span>03</span><b>测速策略</b></legend>
           <div class="mode-grid">
-            <label class="mode-card"><input type="radio" name="mode" value="balanced"><span class="mode-content"><i class="mode-icon mode-balanced">≈</i><strong>均衡模式</strong><small>先快速筛选，再对入围 IP 进行两轮完整复核。</small></span></label>
-            <label class="mode-card"><input type="radio" name="mode" value="asia" checked><span class="mode-content"><i class="mode-icon mode-asia">⌁</i><strong>亚洲狩猎 <em>默认</em></strong><small>扩大候选并做三轮复核；稳定速度优先，亚洲 POP 同档加分。</small></span></label>
+            <label class="mode-card"><input type="radio" name="mode" value="balanced"><span class="mode-content"><i class="mode-icon mode-balanced">≈</i><strong>均衡模式</strong><small>并发快筛 100 个候选；达到目标带宽并复测通过后立即停止。</small></span></label>
+            <label class="mode-card"><input type="radio" name="mode" value="asia" checked><span class="mode-content"><i class="mode-icon mode-asia">⌁</i><strong>亚洲狩猎 <em>默认</em></strong><small>速度与稳定性优先；亚洲 POP 只在同档成绩中加分，达标后早停。</small></span></label>
+            <label class="mode-card"><input type="radio" name="mode" value="max"><span class="mode-content"><i class="mode-icon mode-max">↗</i><strong>最大带宽</strong><small>前 10 个候选全部做 1 秒测速，再复测最快的前 3 个；耗时和流量更高。</small></span></label>
           </div>
         </fieldset>
 
@@ -84,7 +85,7 @@
             <div class="subscription-row"><input id="subscriptionUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://example.com/ip-set.txt"><button id="fetchSubscriptionButton" class="mini-button" type="button">读取 HTTPS 链接</button></div>
             <p id="ipSourceStatus" class="source-status">支持 TXT、CSV、TSV、JSON、Base64、长粘贴和 CIDR；只有 Cloudflare 官方网段地址会进入测速。</p>
           </div>
-          <p class="traffic-note"><b>流量提醒</b>：Pre、Micro、Full 均为真实 HTTPS 下载。亚洲狩猎与双栈会消耗更多时间和流量。</p>
+          <p class="traffic-note"><b>流量提醒</b>：先并发小流量快筛，再进行 1 秒 HTTPS 吞吐测试。均衡/亚洲狩猎达标早停；最大带宽与双栈会消耗更多时间和流量。</p>
         </fieldset>
 
         <fieldset>
