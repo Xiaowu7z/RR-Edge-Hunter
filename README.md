@@ -23,17 +23,11 @@ RR Edge Hunter 是一款本机运行的 Cloudflare 入口 IP 优选工具。默�
 
 ## 下载与运行
 
-### Windows 免安装版（推荐）
+### Windows 安装版（推荐）
 
-[⬇️ 下载最新版 Windows 便携包](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip)
+[⬇️ 下载最新版 Windows 安装程序](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Setup.exe)
 
-解压后双击 `CF-IP-Optimizer.exe`。Python 已包含在便携包中，请保留同目录的 `_internal` 文件夹。
-
-### 测试通道
-
-[🧪 手动下载当前 Windows 测试包](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/download/testing/CF-IP-Optimizer-Windows-x64-testing.zip)
-
-测试包与正式版暂时都保留内部版本号 **1.0.0**，不会触发自动升级；请手动下载、解压并覆盖旧目录。测试通道不会替换正式版 `latest` 链接。
+双击 `CF-IP-Optimizer-Setup.exe` 按提示安装即可。安装包已经包含运行环境，无需另外安装 Python，也无需选择压缩包或 CPU 架构。
 
 ### 源码运行
 
@@ -147,6 +141,6 @@ node --check web/app.js
 
 ## 发布
 
-创建 `vX.Y.Z` 标签后，GitHub Actions 会生成 Windows 便携包及跨平台源码包，并附 manifest 与 SHA-256。当前应用版本保持 **1.0.0**。
+`main` 通过测试后，GitHub Actions 会替换唯一的正式 Release，生成 Windows x64 安装程序及 SHA-256。旧正式包与测试通道不会继续保留。当前应用版本保持 **1.0.0**。
 
 项目尚未选择开源许可证；复用或分发代码前请先取得版权所有者许可。

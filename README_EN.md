@@ -23,13 +23,7 @@ Asia Hunt still prioritizes success rate, round floor, minimum/average throughpu
 
 ## Install
 
-[Download the latest Windows portable package](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip), extract it, and run `CF-IP-Optimizer.exe`. Python is bundled; keep the adjacent `_internal` directory.
-
-### Testing channel
-
-[Manually download the current Windows testing package](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/download/testing/CF-IP-Optimizer-Windows-x64-testing.zip).
-
-The testing and stable packages intentionally remain at internal version **1.0.0**, so this package must be installed manually. The testing channel does not replace the stable `latest` link.
+[Download the latest Windows installer](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Setup.exe) and follow the setup wizard. The installer includes the runtime; Python and archive selection are not required.
 
 ### Run from source
 
