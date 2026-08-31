@@ -12,9 +12,6 @@ import urllib.request
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Protocol
 
-from .ranges import is_cloudflare_ip
-
-
 CLOUDFLARE_API_BASE = "https://api.cloudflare.com/client/v4"
 DEFAULT_TIMEOUT_SECONDS = 12.0
 DEFAULT_MAX_RESPONSE_BYTES = 512 * 1024
@@ -233,11 +230,17 @@ def normalize_champion_ip(value: object) -> tuple[str, str]:
         parsed = ipaddress.ip_address(raw)
     except ValueError:
         raise CloudflareDnsError("冠军 IP 无效", code="invalid_ip") from None
-    if not parsed.is_global:
+    if (
+        not parsed.is_global
+        or parsed.is_private
+        or parsed.is_loopback
+        or parsed.is_link_local
+        or parsed.is_multicast
+        or parsed.is_reserved
+        or parsed.is_unspecified
+    ):
         raise CloudflareDnsError("冠军 IP 必须是公网单播地址", code="invalid_ip")
     normalized = str(parsed)
-    if not is_cloudflare_ip(normalized):
-        raise CloudflareDnsError("冠军 IP 不在 Cloudflare 官方网段内，拒绝写入 DNS", code="not_cloudflare_ip")
     return normalized, "A" if parsed.version == 4 else "AAAA"
 
 

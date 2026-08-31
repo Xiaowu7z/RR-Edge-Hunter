@@ -55,7 +55,7 @@
           <div class="mode-grid">
             <label class="mode-card"><input type="radio" name="mode" value="balanced"><span class="mode-content"><i class="mode-icon mode-balanced">≈</i><strong>均衡模式</strong><small>并发快筛 100 个候选；达到目标带宽并复测通过后立即停止。</small></span></label>
             <label class="mode-card"><input type="radio" name="mode" value="asia" checked><span class="mode-content"><i class="mode-icon mode-asia">⌁</i><strong>亚洲狩猎 <em>默认</em></strong><small>速度与稳定性优先；亚洲 POP 只在同档成绩中加分，达标后早停。</small></span></label>
-            <label class="mode-card"><input type="radio" name="mode" value="max"><span class="mode-content"><i class="mode-icon mode-max">↗</i><strong>最大带宽</strong><small>前 10 个候选全部做 1 秒测速，再复测最快的前 3 个；耗时和流量更高。</small></span></label>
+            <label class="mode-card"><input type="radio" name="mode" value="max"><span class="mode-content"><i class="mode-icon mode-max">↗</i><strong>最大带宽</strong><small>20 个延迟与路径多样候选全部做 1 秒测速，再补足 3 个稳定复测结果；耗时和流量更高。</small></span></label>
           </div>
         </fieldset>
 
@@ -77,13 +77,13 @@
 
         <fieldset>
           <legend><span>A2</span><b>候选来源</b></legend>
-          <div class="segment-control source-control"><label><input type="radio" name="ipSource" value="dns" checked><span id="builtInSourceLabel">Cloudflare 官方 IP 池</span></label><label><input type="radio" name="ipSource" value="custom"><span id="customSourceLabel">官方池 + 我的名单</span></label></div>
+          <div class="segment-control source-control"><label><input type="radio" name="ipSource" value="dns" checked><span id="builtInSourceLabel">Cloudflare 官方 IP 池</span></label><label><input type="radio" name="ipSource" value="custom"><span id="customSourceLabel">官方池 + 外部公网名单</span></label></div>
           <div id="customSourcePanel" class="custom-source" hidden>
             <label class="field-label" for="ipInput">粘贴 IP / IP:443 / CIDR</label>
             <textarea id="ipInput" rows="5" spellcheck="false" placeholder="104.16.0.1&#10;[2606:4700:4700::1111]:443&#10;104.16.0.0/24"></textarea>
             <div class="import-actions"><button id="parseIpsButton" class="mini-button" type="button">识别输入</button><button id="chooseIpFile" class="mini-button" type="button">导入文件</button><input id="ipFile" type="file" accept=".txt,.list,.csv,.tsv,.json,.conf,text/plain,text/csv,application/json" hidden></div>
             <div class="subscription-row"><input id="subscriptionUrl" type="url" inputmode="url" autocomplete="off" placeholder="https://example.com/ip-set.txt"><button id="fetchSubscriptionButton" class="mini-button" type="button">读取 HTTPS 链接</button></div>
-            <p id="ipSourceStatus" class="source-status">支持 TXT、CSV、TSV、JSON、Base64、长粘贴和 CIDR；只有 Cloudflare 官方网段地址会进入测速。</p>
+            <p id="ipSourceStatus" class="source-status">支持 TXT、CSV、TSV、JSON、Base64、长粘贴、CIDR 与 HTTPS 订阅。任意公网 IP 可作为受限候选；私网/本地/保留地址会被拒绝，只有通过 3 轮 TCP 与两次严格 Cloudflare 身份下载复测的地址才会输出。</p>
           </div>
           <p class="traffic-note"><b>流量提醒</b>：先并发小流量快筛，再进行 1 秒 HTTPS 吞吐测试。均衡/亚洲狩猎达标早停；最大带宽与双栈会消耗更多时间和流量。</p>
         </fieldset>
@@ -153,7 +153,7 @@
       <div id="historyRows" class="history-grid"><p class="history-empty">正在读取本地历史…</p></div>
     </section>
 
-    <section class="method-grid"><article><span>01</span><h3>官方 IP 池实测</h3><p>测速端点 DNS 种子、Cloudflare 官方 CIDR 分散抽样和用户导入官方网段组成候选；无需提供节点域名。</p></article><article><span>02</span><h3>只输出 address / server</h3><p>结果主操作只有复制 IP。节点 UUID、端口、传输、TLS SNI、HTTP Host 和 WS Path 均由用户保留原配置。</p></article><article><span>03</span><h3>稳定速度优先</h3><p>失败按 0 计，先看复核底线和成功率；亚洲 POP 只在性能接近时作为偏好，不会压过巨大速度差。</p></article></section>
+    <section class="method-grid"><article><span>01</span><h3>官方池 + 受限外部池</h3><p>默认只用测速端点 DNS 种子与 Cloudflare 官方 CIDR 轮转抽样；用户也可导入任意安全公网 IP，但不会预置第三方远程池。</p></article><article><span>02</span><h3>严格验证后输出</h3><p>候选须通过 3 轮 TCP 快筛和两次带系统证书、SNI/Host、真实 peer、CF-RAY 校验的下载复测；Argo 再加节点兼容门禁。</p></article><article><span>03</span><h3>稳定速度优先</h3><p>最终列表只保留两次成功的候选；亚洲 POP 只在性能接近时作为偏好，最大带宽模式同时保留较慢区间的多样候选。</p></article></section>
     <aside class="legal-note"><span>使用边界 · 非官方独立工具</span><p>本工具仅用于在自有或获授权的网络与主机上进行本地边缘连通性诊断，不提供端口扫描、漏洞探测、压力测试、代理服务或绕过访问控制能力。Cloudflare 等名称与商标归其权利人所有，本工具与相关服务商不存在隶属、合作、赞助或背书关系。</p></aside>
   </main>
   <footer><span>RR Edge Hunter · Local only</span><span>数据保存在本机，不上传测速结果</span></footer><div id="toast" class="toast" role="status" aria-live="polite"></div>

@@ -480,7 +480,6 @@ def _csv_bytes(result: OptimizerResult) -> bytes:
 def _traffic_upper_bound_mb(mode: str, family: str, target_mbps: int = 100) -> float:
     params = MODES[mode]
     shortlist = min(MAX_CANDIDATES_PER_FAMILY, params.micro_candidates)
-    confirmations = min(shortlist, params.final_candidates)
     request_floor = 64_000_000 if not params.early_stop else 4_000_000
     request_bytes = min(
         256_000_000,
@@ -488,7 +487,7 @@ def _traffic_upper_bound_mb(mode: str, family: str, target_mbps: int = 100) -> f
     )
     per_family = (
         MAX_CANDIDATES_PER_FAMILY * params.pre_bytes
-        + (shortlist + confirmations) * request_bytes
+        + shortlist * 2 * request_bytes
     ) / 1_000_000.0
     return round(per_family * (2 if family == "dual" else 1), 1)
 
@@ -692,6 +691,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                             "label": mode.label,
                             "micro_candidates": mode.micro_candidates,
                             "final_candidates": mode.final_candidates,
+                            "pre_concurrency": mode.pre_concurrency,
                             "pre_bytes": mode.pre_bytes,
                             "micro_bytes": mode.micro_bytes,
                             "full_bytes": mode.full_bytes,

@@ -8,7 +8,12 @@ import time
 import unittest
 from unittest.mock import patch
 
-from cfopt.probe import probe_argo_compatibility, probe_speed_window, speed_request_bytes
+from cfopt.probe import (
+    _speed_sample_has_sufficient_window,
+    probe_argo_compatibility,
+    probe_speed_window,
+    speed_request_bytes,
+)
 
 
 class _FakeRawSocket:
@@ -98,6 +103,34 @@ class ArgoProbeTest(unittest.TestCase):
         self.assertIn("Connection: close\r\n", request)
         default_context.assert_called_once_with()
 
+    def test_argo_gate_shares_one_absolute_deadline_across_all_phases(self) -> None:
+        raw = _FakeRawSocket()
+        stream = _FakeTlsStream()
+        context = _FakeContext(stream)
+        deadlines: list[float] = []
+
+        def headers(_stream, _cancel, deadline):
+            deadlines.append(deadline)
+            return b"HTTP/1.1 200 OK\r\nContent-Length: 21", b"", time.perf_counter()
+
+        def body(_stream, _initial, _headers, _cancel, _idle, deadline, _limit):
+            deadlines.append(deadline)
+            return b"colo=HKG\nloc=HK\n"
+
+        with (
+            patch("cfopt.probe.socket.socket", return_value=raw),
+            patch("cfopt.probe.ssl.create_default_context", return_value=context),
+            patch("cfopt.probe._read_headers", side_effect=headers),
+            patch("cfopt.probe._read_body", side_effect=body),
+            patch("cfopt.probe.time.monotonic", side_effect=[100.0, 101.0, 102.0, 103.0, 104.0, 105.0, 106.0, 107.0, 108.0]),
+        ):
+            result = probe_argo_compatibility(
+                "104.16.0.9", timeout_sec=10, hostname="argo.example.com"
+            )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(deadlines, [110.0, 110.0])
+
     def test_ws_gate_requires_real_upgrade_accept_and_one_connection_header(self) -> None:
         raw = _FakeRawSocket()
         stream = _FakeTlsStream()
@@ -163,11 +196,12 @@ class ArgoProbeTest(unittest.TestCase):
         raw = _FakeRawSocket()
         stream = _FakeTlsStream()
         context = _FakeContext(stream)
+        requested = speed_request_bytes(100)
 
         def headers(_stream, _cancel, _deadline):
             return (
-                b"HTTP/1.1 200 OK\r\nCF-RAY: 0123456789abcdef-LAX\r\nContent-Length: 4000000",
-                b"x" * 32_768,
+                f"HTTP/1.1 200 OK\r\nCF-RAY: 0123456789abcdef-LAX\r\nContent-Length: {requested}".encode("ascii"),
+                b"x" * requested,
                 time.perf_counter(),
             )
 
@@ -183,7 +217,7 @@ class ArgoProbeTest(unittest.TestCase):
         self.assertTrue(result.target_matches_remote)
         self.assertEqual(result.colo, "LAX")
         self.assertEqual(context.server_hostname, "speed.cloudflare.com")
-        self.assertIn(f"/__down?bytes={speed_request_bytes(100)}", stream.sent.decode("ascii"))
+        self.assertIn(f"/__down?bytes={requested}", stream.sent.decode("ascii"))
         default_context.assert_called_once_with()
 
     def test_speed_probe_rejects_response_without_cf_ray(self) -> None:
@@ -205,6 +239,61 @@ class ArgoProbeTest(unittest.TestCase):
             result = probe_speed_window("104.16.0.9", 100, sample_seconds=0.25)
         self.assertFalse(result.ok)
         self.assertIn("CF-RAY", result.error)
+
+    def test_speed_window_rejects_short_partial_body_but_accepts_full_response(self) -> None:
+        requested = speed_request_bytes(100)
+        self.assertFalse(_speed_sample_has_sufficient_window(32_768, requested, 0.01, 1.0))
+        self.assertFalse(_speed_sample_has_sufficient_window(requested - 1, requested, 0.79, 1.0))
+        self.assertTrue(_speed_sample_has_sufficient_window(requested - 1, requested, 0.81, 1.0))
+        self.assertTrue(_speed_sample_has_sufficient_window(requested, requested, 0.01, 1.0))
+
+    def test_complete_speed_includes_connection_tls_and_ttfb_overhead(self) -> None:
+        raw = _FakeRawSocket()
+        stream = _FakeTlsStream()
+        context = _FakeContext(stream)
+        requested = speed_request_bytes(100)
+
+        with (
+            patch("cfopt.probe.socket.socket", return_value=raw),
+            patch("cfopt.probe.ssl.create_default_context", return_value=context),
+            patch(
+                "cfopt.probe._read_headers",
+                return_value=(
+                    f"HTTP/1.1 200 OK\r\nCF-RAY: abcdef-LAX\r\nContent-Length: {requested}".encode("ascii"),
+                    b"x" * requested,
+                    0.25,
+                ),
+            ),
+            patch("cfopt.probe.time.perf_counter", side_effect=[0.0, 0.1, 0.2, 0.3, 1.3]),
+        ):
+            result = probe_speed_window("104.16.0.9", 100, sample_seconds=1.0)
+
+        self.assertTrue(result.ok)
+        self.assertAlmostEqual(result.body_ms, 1000.0)
+        self.assertAlmostEqual(result.total_ms, 1300.0)
+        self.assertGreater(result.payload_mbps, result.complete_mbps)
+
+    def test_speed_probe_rejects_redirect_and_early_partial_eof(self) -> None:
+        for status in (200, 302):
+            with self.subTest(status=status):
+                raw = _FakeRawSocket()
+                stream = _FakeTlsStream()
+                context = _FakeContext(stream)
+                with (
+                    patch("cfopt.probe.socket.socket", return_value=raw),
+                    patch("cfopt.probe.ssl.create_default_context", return_value=context),
+                    patch(
+                        "cfopt.probe._read_headers",
+                        return_value=(
+                            f"HTTP/1.1 {status} Test\r\nCF-RAY: abcdef-LAX\r\nContent-Length: 4000000".encode("ascii"),
+                            b"x" * 32_768,
+                            time.perf_counter(),
+                        ),
+                    ),
+                ):
+                    result = probe_speed_window("104.16.0.9", 100, sample_seconds=0.25)
+                self.assertFalse(result.ok)
+                self.assertIn("HTTP 302" if status == 302 else "测速窗口过短", result.error)
 
     def test_speed_request_is_bounded_and_max_mode_uses_longer_sample(self) -> None:
         self.assertEqual(speed_request_bytes(100), 18_750_000)

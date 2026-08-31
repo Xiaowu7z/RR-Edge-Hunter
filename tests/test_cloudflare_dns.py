@@ -104,6 +104,7 @@ class CloudflareDnsValidationTest(unittest.TestCase):
         self.assertEqual(normalize_record_name("Edge.Example.COM."), "edge.example.com")
         self.assertEqual(normalize_record_name("测速.example.com"), "xn--0zwy65e.example.com")
         self.assertEqual(normalize_champion_ip("104.16.0.1"), ("104.16.0.1", "A"))
+        self.assertEqual(normalize_champion_ip("8.8.8.8"), ("8.8.8.8", "A"))
         self.assertEqual(normalize_champion_ip("2606:4700:4700::1111"), ("2606:4700:4700::1111", "AAAA"))
 
     def test_rejects_invalid_zone_record_and_non_public_ip(self) -> None:
@@ -113,7 +114,7 @@ class CloudflareDnsValidationTest(unittest.TestCase):
             lambda: normalize_record_name("104.16.0.1"),
             lambda: normalize_record_name("localhost"),
             lambda: normalize_champion_ip("127.0.0.1"),
-            lambda: normalize_champion_ip("8.8.8.8"),
+            lambda: normalize_champion_ip("10.0.0.1"),
             lambda: normalize_champion_ip("fe80::1%3"),
         )
         for call in invalid_calls:

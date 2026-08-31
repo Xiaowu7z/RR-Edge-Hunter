@@ -2,7 +2,7 @@
 
 **Cloudflare Preferred-IP Selector · Desktop**
 
-RR Edge Hunter is a local Cloudflare ingress-IP selector. The default scan requires no user hostname: it pins `speed.cloudflare.com` to each candidate on port `443`, retains normal TLS certificate, SNI, Host, and actual-peer validation, and performs staged multi-round downloads.
+RR Edge Hunter is a local Cloudflare ingress-IP selector. The default scan requires no user hostname: it first performs three bounded TCP-connect rounds, then pins `speed.cloudflare.com` to shortlisted candidates on port `443` and retains strict certificate, SNI, Host, CF-RAY, and actual-peer validation for real download samples.
 
 The output is a bare IPv4 or IPv6 address. Put it only in the proxy node's `address` or `server` field. Keep the node's original port, UUID, protocol, TLS SNI, HTTP Host, and WebSocket Path unchanged.
 
@@ -16,18 +16,14 @@ The output is a bare IPv4 or IPv6 address. Put it only in the proxy node's `addr
 | Target bandwidth | 100 Mbps |
 | Strategy | Asia Hunt |
 | Measurement identity | `speed.cloudflare.com:443` |
-| Candidate source | Official Cloudflare pool, optionally plus imported official-range IPs |
+| Candidate source | Official Cloudflare pool by default; optional restricted public-IP imports |
 | Output | Replace node `address/server` only |
 
 Asia Hunt still prioritizes success rate, round floor, minimum/average throughput, and variance. POP labels such as HKG, NRT, SIN, ICN, and TPE are tie-breakers only.
 
-## Install
+## Portable Windows build (the only release)
 
-[Download the latest Windows installer](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Setup.exe) and follow the setup wizard. The installer includes the runtime; Python and archive selection are not required.
-
-### Portable Windows build (no installation)
-
-[Download the latest Windows x64 portable ZIP](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip), extract it, open the `CF-IP-Optimizer` directory, and run `CF-IP-Optimizer.exe`. The runtime is included, so Python is not required. Keep the executable next to its `_internal` directory instead of moving the EXE by itself.
+[Download the latest Windows x64 portable ZIP](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip), extract it, open the `CF-IP-Optimizer` directory, and run `CF-IP-Optimizer.exe`. The runtime is included, so Python is not required. Keep the executable next to its `_internal` directory instead of moving the EXE by itself. An installer is no longer published.
 
 ### Run from source
 
@@ -42,18 +38,19 @@ The UI binds to `127.0.0.1` only and does not upload measurement history.
 ## How it works
 
 1. Load current `speed.cloudflare.com` DNS seeds and a bounded deterministic sample of Cloudflare-published CIDRs.
-2. Optionally add imported addresses that belong to official Cloudflare ranges.
-3. Pin `speed.cloudflare.com:443` to each exact candidate while retaining system certificate validation, SNI, Host, and TCP-peer checks.
-4. Run Pre, Micro, and repeated Full downloads. Failed Full rounds count as `0 Mbps`.
-5. Rank by reliability, round floor, minimum/average throughput, variance, and TTFB; POP is only a near-tie preference.
+2. Optionally add any safe public-unicast address as a restricted candidate. Private, local, multicast, and reserved targets are rejected. The default one-click pool remains official-only and no third-party remote pool is preloaded.
+3. Run three TCP-connect rounds per candidate with a one-second per-connect bound and up to 50 workers. This cheap stage only forms a shortlist and can never make an address copyable.
+4. Target modes test the 10 lowest-latency candidates. Maximum Bandwidth tests 20 candidates and reserves several positions across latency bands/prefixes so throughput-rich routes are not excluded too early.
+5. Pin `speed.cloudflare.com:443` to each shortlisted address and run bounded real HTTPS downloads with strict certificate, SNI, Host, CF-RAY, and actual-peer checks. Confirmed results require two successful samples; failed confirmations are replaced by the next candidate.
+6. Expose only candidates with two successful strict download samples, then rank them by round floor, average throughput, variance, and TTFB; POP is only a near-tie preference.
 
 The default workflow measures the current client-to-Cloudflare ingress path. It does not need the VPS origin IP and does not rewrite node configuration.
 
 ## Custom candidate pools
 
-Long paste, local TXT/CSV/TSV/JSON/Base64 files, bounded CIDR sampling, IPv4/IPv6 endpoint notation, and public HTTPS subscriptions are supported. Imported addresses do not need to intersect the speed hostname's current DNS answers, but every tested target must belong to an official Cloudflare CIDR. Private, reserved, non-Cloudflare, wrong-family, and malformed targets are rejected; candidate count, concurrency, and download traffic are bounded.
+Long paste, local TXT/CSV/TSV/JSON/Base64 files, bounded CIDR sampling, IPv4/IPv6 endpoint notation, and public HTTPS subscriptions are supported. Imports do not need to intersect the speed hostname's current DNS answers or belong to an official Cloudflare CIDR. External addresses remain restricted until they pass three TCP rounds and two `speed.cloudflare.com:443` downloads with system-certificate, SNI, Host, actual-peer, and CF-RAY validation; Argo adds its node-host compatibility gate. Private, local, multicast, reserved, wrong-family, and malformed targets are rejected; candidate count, concurrency, and traffic remain bounded.
 
-Unofficial third-party relays are not mixed into the default official pool.
+No third-party relay pool is built in or fetched automatically. Explicit user imports never bypass the strict gates above.
 
 ## Optional advanced Argo compatibility check
 
@@ -66,6 +63,7 @@ Candidates must then pass certificate, SNI, Host, and actual-peer checks; a supp
 After a successful scan, a champion may be written to one explicitly selected Cloudflare DNS record. This feature is off by default and ordinary scanning requires no Cloudflare credentials.
 
 - IPv4 maps to `A`; IPv6 maps to `AAAA`.
+- Only the current run's stable champion with two successful strict download samples is accepted; it may come from an official range or an explicitly imported external public candidate that passed every gate.
 - The record is forced to **DNS-only** (gray cloud).
 - A 32-character Zone ID and full record FQDN are required.
 - Only an API Token is accepted; the minimum permission is **DNS: Edit** for the selected Zone. Global API Keys are not accepted.

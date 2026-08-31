@@ -110,6 +110,48 @@ def _socket_address(target_ip: str, port: int = 443) -> tuple[int, tuple[object,
     return socket.AF_INET, (str(address), port)
 
 
+def probe_tcp_rtt(
+    target_ip: str,
+    timeout_sec: float = 1.0,
+    cancel_event: threading.Event | None = None,
+    *,
+    port: int = 443,
+) -> ProbeResult:
+    """Measure one bounded TCP connect without weakening later TLS checks."""
+    cancel = cancel_event or threading.Event()
+    target_ip = normalized_ip(target_ip)
+    family, address = _socket_address(target_ip, port)
+    raw = socket.socket(family, socket.SOCK_STREAM)
+    started = time.perf_counter()
+    try:
+        if cancel.is_set():
+            raise ProbeCancelled("已取消")
+        raw.settimeout(max(0.1, min(float(timeout_sec), 3.0)))
+        raw.connect(address)
+        if cancel.is_set():
+            raise ProbeCancelled("已取消")
+        elapsed = (time.perf_counter() - started) * 1000.0
+        return ProbeResult(
+            ok=True,
+            family=family_of(target_ip) or "未知",
+            target_ip=target_ip,
+            actual_remote_address=target_ip,
+            target_matches_remote=True,
+            remote_is_ipv6=":" in target_ip,
+            tcp_ms=elapsed,
+            ttfb_ms=elapsed,
+        )
+    except ProbeCancelled:
+        return ProbeResult(ok=False, error="已取消", target_ip=target_ip)
+    except OSError as exc:
+        return ProbeResult(ok=False, error=f"{type(exc).__name__}: {str(exc)[:100]}", target_ip=target_ip)
+    finally:
+        try:
+            raw.close()
+        except OSError:
+            pass
+
+
 def _read_headers(stream: ssl.SSLSocket, cancel_event: threading.Event, deadline: float) -> tuple[bytes, bytes, float]:
     buffer = bytearray()
     first_byte_at = -1.0
@@ -292,6 +334,17 @@ def _cloudflare_colo(headers: dict[str, str]) -> str:
     return suffix if re.fullmatch(r"[A-Z0-9]{3,5}", suffix) else ""
 
 
+def _speed_sample_has_sufficient_window(
+    downloaded: int,
+    requested: int,
+    elapsed_seconds: float,
+    sample_seconds: float,
+) -> bool:
+    """Reject tiny instant bodies while allowing a genuinely completed sample."""
+    window = max(0.25, min(float(sample_seconds), 3.0))
+    return elapsed_seconds >= window * 0.8 or (requested > 0 and downloaded >= requested)
+
+
 def probe_speed_window(
     target_ip: str,
     target_mbps: int,
@@ -315,19 +368,30 @@ def probe_speed_window(
     target_ip = normalized_ip(target_ip)
     family, address = _socket_address(target_ip, port)
     connect_started = time.perf_counter()
-    absolute_deadline = time.monotonic() + max(1.0, float(timeout_sec)) + max(0.25, sample_seconds) + 2.0
+    sample_window = max(0.25, min(float(sample_seconds), 3.0))
+    absolute_deadline = time.monotonic() + max(1.0, float(timeout_sec))
     raw = socket.socket(family, socket.SOCK_STREAM)
     stream: ssl.SSLSocket | None = None
     try:
         if cancel.is_set():
             raise ProbeCancelled("已取消")
-        raw.settimeout(float(timeout_sec))
+        remaining = absolute_deadline - time.monotonic()
+        if remaining <= 0.0:
+            raise TimeoutError("测速总截止时间已到")
+        raw.settimeout(max(0.1, remaining))
         raw.connect(address)
+        if cancel.is_set():
+            raise ProbeCancelled("已取消")
         connected = time.perf_counter()
         context = ssl.create_default_context()
         stream = context.wrap_socket(raw, server_hostname=hostname, do_handshake_on_connect=False)
-        stream.settimeout(float(timeout_sec))
+        remaining = absolute_deadline - time.monotonic()
+        if remaining <= 0.0:
+            raise TimeoutError("TLS 握手前已超过测速总截止时间")
+        stream.settimeout(max(0.1, remaining))
         stream.do_handshake()
+        if cancel.is_set():
+            raise ProbeCancelled("已取消")
         tls_done = time.perf_counter()
         remote = normalized_ip(stream.getpeername()[0])
         request = (
@@ -343,7 +407,7 @@ def probe_speed_window(
         head, initial, first_byte_at = _read_headers(stream, cancel, absolute_deadline)
         status, version, headers = _parse_head(head)
         body_started = time.perf_counter()
-        sample_deadline = time.monotonic() + max(0.25, min(float(sample_seconds), 3.0))
+        sample_deadline = min(absolute_deadline, time.monotonic() + sample_window)
         downloaded = min(len(initial), requested)
         while downloaded < requested:
             if cancel.is_set():
@@ -351,9 +415,9 @@ def probe_speed_window(
             remaining = sample_deadline - time.monotonic()
             if remaining <= 0.0:
                 break
-            stream.settimeout(min(0.25, remaining))
+            stream.settimeout(min(0.1, remaining))
             try:
-                chunk = stream.recv(min(64 * 1024, requested - downloaded))
+                chunk = stream.recv(min(256 * 1024, requested - downloaded))
             except socket.timeout:
                 continue
             if not chunk:
@@ -364,17 +428,24 @@ def probe_speed_window(
         colo = _cloudflare_colo(headers)
         body_seconds = max(body_done - body_started, 0.001)
         enough = downloaded >= min(32_768, requested)
-        ok = 200 <= status <= 399 and target_matches and bool(colo) and enough
+        sufficient_window = _speed_sample_has_sufficient_window(
+            downloaded, requested, body_seconds, sample_window
+        )
+        ok = 200 <= status <= 299 and target_matches and bool(colo) and enough and sufficient_window
         error = ""
         if not target_matches:
             error = f"实际连接地址不一致：{remote}"
-        elif not 200 <= status <= 399:
+        elif not 200 <= status <= 299:
             error = f"HTTP {status}"
         elif not colo:
             error = "响应缺少有效 CF-RAY，无法确认 Cloudflare 边缘"
         elif not enough:
             error = f"测速数据不足：{downloaded} 字节"
+        elif not sufficient_window:
+            error = f"测速窗口过短：{body_seconds:.3f}s"
+        total_seconds = max(body_done - connect_started, 0.001)
         payload_mbps = downloaded * 8.0 / body_seconds / 1_000_000.0 if ok else 0.0
+        complete_mbps = downloaded * 8.0 / total_seconds / 1_000_000.0 if ok else 0.0
         return ProbeResult(
             ok=ok,
             error=error,
@@ -391,11 +462,11 @@ def probe_speed_window(
             tls_ms=(tls_done - connected) * 1000.0,
             ttfb_ms=(first_byte_at - connect_started) * 1000.0,
             body_ms=body_seconds * 1000.0,
-            total_ms=(body_done - connect_started) * 1000.0,
+            total_ms=total_seconds * 1000.0,
             bytes_downloaded=downloaded,
             bytes_target=requested,
             payload_mbps=payload_mbps,
-            complete_mbps=payload_mbps,
+            complete_mbps=complete_mbps,
             colo=colo,
         )
     except ProbeCancelled:
@@ -519,18 +590,28 @@ def probe_argo_compatibility(
             return ProbeResult(ok=False, error="WS 路径格式无效", target_ip=target_ip, sni=hostname)
     family, address = _socket_address(target_ip, port)
     started = time.perf_counter()
+    absolute_deadline = time.monotonic() + max(1.0, float(timeout_sec))
     raw = socket.socket(family, socket.SOCK_STREAM)
     stream: ssl.SSLSocket | None = None
-    try:
+
+    def remaining() -> float:
         if cancel.is_set():
             raise ProbeCancelled("已取消")
-        raw.settimeout(float(timeout_sec))
+        value = absolute_deadline - time.monotonic()
+        if value <= 0.0:
+            raise TimeoutError("Argo 兼容验证总截止时间已到")
+        return value
+
+    try:
+        raw.settimeout(remaining())
         raw.connect(address)
+        remaining()
         connected = time.perf_counter()
         context = ssl.create_default_context()
         stream = context.wrap_socket(raw, server_hostname=hostname, do_handshake_on_connect=False)
-        stream.settimeout(float(timeout_sec))
+        stream.settimeout(remaining())
         stream.do_handshake()
+        remaining()
         tls_done = time.perf_counter()
         remote = normalized_ip(stream.getpeername()[0])
         target_matches = ipaddress.ip_address(target_ip) == ipaddress.ip_address(remote)
@@ -554,9 +635,11 @@ def probe_argo_compatibility(
             "Accept-Encoding: identity\r\n"
             f"{connection_header}\r\n"
         ).encode("ascii")
+        stream.settimeout(remaining())
         stream.sendall(request)
-        deadline = time.monotonic() + timeout_sec
-        head, initial, first_byte_at = _read_headers(stream, cancel, deadline)
+        remaining()
+        head, initial, first_byte_at = _read_headers(stream, cancel, absolute_deadline)
+        remaining()
         status, version, headers = _parse_head(head)
         colo = ""
         loc = ""
@@ -574,7 +657,7 @@ def probe_argo_compatibility(
             )
             error = "" if ok_status else f"WebSocket 握手未通过（HTTP {status}）"
         else:
-            body = _read_body(stream, initial, headers, cancel, timeout_sec, deadline, 64 * 1024)
+            body = _read_body(stream, initial, headers, cancel, timeout_sec, absolute_deadline, 64 * 1024)
             bytes_downloaded = len(body)
             trace_values: dict[str, str] = {}
             for line in body.decode("utf-8", errors="replace").splitlines():
@@ -585,6 +668,7 @@ def probe_argo_compatibility(
             loc = trace_values.get("loc", "").upper()
             ok_status = 200 <= status <= 399 and bool(colo)
             error = "" if ok_status else (f"Argo 主机返回 HTTP {status}" if not 200 <= status <= 399 else "未获得 Cloudflare Trace")
+        remaining()
         ok = bool(target_matches and ok_status)
         if not target_matches:
             error = f"实际连接地址不一致：{remote}"
