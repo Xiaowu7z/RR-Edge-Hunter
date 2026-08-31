@@ -47,14 +47,35 @@ def stability_label(variation_pct: float, success_rate_pct: float) -> str:
     return "较差"
 
 
+def _confirmed(item: IpMetric) -> bool:
+    return item.rounds_tested >= 2 and item.success_rate_pct >= 99.9 and item.round_floor_mbps > 0.0
+
+
 def rank(metrics: list[IpMetric]) -> list[IpMetric]:
     return sorted(
         metrics,
         key=lambda item: (
+            -int(_confirmed(item)),
             -item.round_floor_mbps,
             -item.success_rate_pct,
             -item.min_complete_mbps,
             -item.avg_complete_mbps,
+            item.variation_pct,
+            item.median_ttfb_ms if item.median_ttfb_ms >= 0.0 else math.inf,
+        ),
+    )
+
+
+def rank_maximum(metrics: list[IpMetric]) -> list[IpMetric]:
+    """Rank confirmed candidates by two-sample average download throughput."""
+    return sorted(
+        metrics,
+        key=lambda item: (
+            -int(_confirmed(item)),
+            -item.avg_complete_mbps,
+            -item.max_complete_mbps,
+            -item.round_floor_mbps,
+            -item.success_rate_pct,
             item.variation_pct,
             item.median_ttfb_ms if item.median_ttfb_ms >= 0.0 else math.inf,
         ),

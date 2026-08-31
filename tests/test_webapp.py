@@ -224,7 +224,7 @@ class WebApiTest(unittest.TestCase):
             inspect_sync.assert_not_called()
 
         self.state.result = self._completed_result()
-        self.state.result.families[0].ranked[0].rounds_tested = 2
+        self.state.result.families[0].ranked[0].rounds_tested = 1
         with (
             patch("cfopt.webapp._network_matches_result", return_value=True),
             patch("cfopt.webapp._inspect_dns_sync") as inspect_sync,

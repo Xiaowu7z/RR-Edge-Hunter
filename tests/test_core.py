@@ -4,13 +4,14 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from cfopt.models import ASIA_HUNT, BALANCED, ProbeResult
-from cfopt.pipeline import MAX_CANDIDATES_PER_FAMILY, build_snapshot, full_schedule, normalize_ws_path, run_optimizer
+from cfopt.models import ASIA_HUNT, BALANCED, MAX_BANDWIDTH, IpMetric, ProbeResult
+from cfopt.pipeline import MAX_CANDIDATES_PER_FAMILY, _run_fast_speed_stage, build_snapshot, full_schedule, normalize_ws_path, run_optimizer
 from cfopt.ranges import family_of, is_cloudflare_ip, sample_official_cloudflare_ips
+from cfopt.ranking import rank, rank_maximum
 
 
 def _probe(ip: str, bytes_target: int, *_args) -> ProbeResult:
-    failed = ip.endswith(".1") and bytes_target == BALANCED.full_bytes
+    failed = ip.endswith(".1") and bytes_target > BALANCED.pre_bytes
     return ProbeResult(
         ok=not failed,
         target_ip=ip,
@@ -135,6 +136,7 @@ class CoreRulesTest(unittest.TestCase):
             patch("cfopt.pipeline.network_fingerprint", return_value=("", "")),
             patch("cfopt.pipeline.sample_official_cloudflare_ips", return_value=[]),
             patch("cfopt.pipeline.probe_download", side_effect=download),
+            patch("cfopt.pipeline.probe_speed_window", side_effect=download),
         ):
             result = run_optimizer(
                 purpose="direct", target_host="attacker.example", node_port=8443,
@@ -210,6 +212,7 @@ class CoreRulesTest(unittest.TestCase):
             patch("cfopt.pipeline.network_fingerprint", return_value=("", "")),
             patch("cfopt.pipeline.sample_official_cloudflare_ips", return_value=[]),
             patch("cfopt.pipeline.probe_download", side_effect=download),
+            patch("cfopt.pipeline.probe_speed_window", side_effect=download),
         ):
             result = run_optimizer(
                 purpose="argo", target_host="argo.example.com", node_port=8443,
@@ -259,6 +262,90 @@ class CoreRulesTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize_ws_path(value)
 
+    def test_fast_mode_confirms_first_target_hit_and_stops(self) -> None:
+        calls: list[str] = []
+
+        def speed(ip: str, *_args) -> ProbeResult:
+            calls.append(ip)
+            return ProbeResult(
+                ok=True,
+                target_ip=ip,
+                actual_remote_address=ip,
+                target_matches_remote=True,
+                cert_verified=True,
+                complete_mbps=125.0,
+                payload_mbps=130.0,
+                ttfb_ms=8.0,
+                bytes_downloaded=12_500_000,
+            )
+
+        output = _run_fast_speed_stage(
+            ["104.16.0.1", "104.16.0.2"],
+            BALANCED,
+            100,
+            threading.Event(),
+            lambda *_: None,
+            lambda *_: None,
+            speed,
+            "IPv4",
+        )
+        self.assertEqual(calls, ["104.16.0.1", "104.16.0.1"])
+        self.assertEqual(len(output["104.16.0.1"]), 2)
+        self.assertNotIn("104.16.0.2", output)
+
+    def test_max_bandwidth_mode_tests_every_shortlisted_ip(self) -> None:
+        calls: list[str] = []
+        speeds = {"104.16.0.1": 80.0, "104.16.0.2": 220.0, "104.16.0.3": 150.0}
+
+        def speed(ip: str, *_args) -> ProbeResult:
+            calls.append(ip)
+            value = speeds[ip]
+            return ProbeResult(
+                ok=True,
+                target_ip=ip,
+                actual_remote_address=ip,
+                target_matches_remote=True,
+                cert_verified=True,
+                complete_mbps=value,
+                payload_mbps=value,
+                ttfb_ms=8.0,
+                bytes_downloaded=8_000_000,
+            )
+
+        output = _run_fast_speed_stage(
+            list(speeds),
+            MAX_BANDWIDTH,
+            100,
+            threading.Event(),
+            lambda *_: None,
+            lambda *_: None,
+            speed,
+            "IPv4",
+        )
+        self.assertEqual(set(output), set(speeds))
+        self.assertEqual(calls[:3], list(speeds))
+        self.assertEqual(calls.count("104.16.0.2"), 2)
+        self.assertTrue(all(len(samples) == 2 for samples in output.values()))
+
+    def test_maximum_bandwidth_prefers_confirmed_average_speed(self) -> None:
+        high_average = IpMetric(
+            "104.16.0.20", "IPv4", min_complete_mbps=45.0,
+            avg_complete_mbps=110.0, max_complete_mbps=125.0,
+            success_rate_pct=100.0, round_floor_mbps=45.0, rounds_tested=2,
+        )
+        high_floor = IpMetric(
+            "104.16.0.21", "IPv4", min_complete_mbps=70.0,
+            avg_complete_mbps=80.0, max_complete_mbps=85.0,
+            success_rate_pct=100.0, round_floor_mbps=70.0, rounds_tested=2,
+        )
+        one_lucky_sample = IpMetric(
+            "104.16.0.22", "IPv4", min_complete_mbps=500.0,
+            avg_complete_mbps=500.0, max_complete_mbps=500.0,
+            success_rate_pct=100.0, round_floor_mbps=500.0, rounds_tested=1,
+        )
+        self.assertEqual(rank_maximum([high_floor, one_lucky_sample, high_average])[0].ip, high_average.ip)
+        self.assertEqual(rank([high_average, high_floor])[0].ip, high_floor.ip)
+
     def test_snapshot_filters_families_and_non_cf(self) -> None:
         snapshot = build_snapshot(["104.16.0.1", "2606:4700::1111", "1.1.1.1"], "IPv4", threading.Event(), lambda *_: None, lambda *_: None)
         self.assertEqual(snapshot.ips, ["104.16.0.1"])
@@ -266,6 +353,7 @@ class CoreRulesTest(unittest.TestCase):
     def test_snapshot_caps_each_family_before_real_probes(self) -> None:
         candidates = [f"104.16.0.{index}" for index in range(1, MAX_CANDIDATES_PER_FAMILY + 20)]
         snapshot = build_snapshot(candidates, "IPv4", threading.Event(), lambda *_: None, lambda *_: None)
+        self.assertEqual(MAX_CANDIDATES_PER_FAMILY, 100)
         self.assertEqual(len(snapshot.ips), MAX_CANDIDATES_PER_FAMILY)
         self.assertEqual(snapshot.ips[0], "104.16.0.1")
 
