@@ -4,9 +4,10 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from cfopt.models import ASIA_HUNT, BALANCED, MAX_BANDWIDTH, ProbeResult
+from cfopt.models import ASIA_HUNT, BALANCED, MAX_BANDWIDTH, IpMetric, ProbeResult
 from cfopt.pipeline import MAX_CANDIDATES_PER_FAMILY, _run_fast_speed_stage, build_snapshot, full_schedule, normalize_ws_path, run_optimizer
 from cfopt.ranges import family_of, is_cloudflare_ip, sample_official_cloudflare_ips
+from cfopt.ranking import rank, rank_maximum
 
 
 def _probe(ip: str, bytes_target: int, *_args) -> ProbeResult:
@@ -325,6 +326,25 @@ class CoreRulesTest(unittest.TestCase):
         self.assertEqual(calls[:3], list(speeds))
         self.assertEqual(calls.count("104.16.0.2"), 2)
         self.assertTrue(all(len(samples) == 2 for samples in output.values()))
+
+    def test_maximum_bandwidth_prefers_confirmed_average_speed(self) -> None:
+        high_average = IpMetric(
+            "104.16.0.20", "IPv4", min_complete_mbps=45.0,
+            avg_complete_mbps=110.0, max_complete_mbps=125.0,
+            success_rate_pct=100.0, round_floor_mbps=45.0, rounds_tested=2,
+        )
+        high_floor = IpMetric(
+            "104.16.0.21", "IPv4", min_complete_mbps=70.0,
+            avg_complete_mbps=80.0, max_complete_mbps=85.0,
+            success_rate_pct=100.0, round_floor_mbps=70.0, rounds_tested=2,
+        )
+        one_lucky_sample = IpMetric(
+            "104.16.0.22", "IPv4", min_complete_mbps=500.0,
+            avg_complete_mbps=500.0, max_complete_mbps=500.0,
+            success_rate_pct=100.0, round_floor_mbps=500.0, rounds_tested=1,
+        )
+        self.assertEqual(rank_maximum([high_floor, one_lucky_sample, high_average])[0].ip, high_average.ip)
+        self.assertEqual(rank([high_average, high_floor])[0].ip, high_floor.ip)
 
     def test_snapshot_filters_families_and_non_cf(self) -> None:
         snapshot = build_snapshot(["104.16.0.1", "2606:4700::1111", "1.1.1.1"], "IPv4", threading.Event(), lambda *_: None, lambda *_: None)

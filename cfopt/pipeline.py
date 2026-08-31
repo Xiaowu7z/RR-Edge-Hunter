@@ -18,7 +18,7 @@ from .ip_sources import MAX_SOURCE_BYTES, IpSourceError, decode_ip_source_bytes,
 from .models import ASIA_HUNT, BALANCED, MODES, FamilyRunResult, IpMetric, ModeParams, OptimizerResult, PopDiscovery, ProbeResult, Snapshot, SPEED_HOST
 from .probe import probe_argo_compatibility, probe_download, probe_speed_window, probe_trace, speed_request_bytes
 from .ranges import family_of, is_cloudflare_ip, normalized_ip, prefix_of, sample_official_cloudflare_ips
-from .ranking import address_floor, median_ttfb, rank, rank_asia, stability_label, success_rate, variation
+from .ranking import address_floor, median_ttfb, rank, rank_asia, rank_maximum, stability_label, success_rate, variation
 
 
 StageCallback = Callable[[str, int, int, str], None]
@@ -517,7 +517,8 @@ def _run_fast_speed_stage(
         if params.early_stop and first.ok and first.complete_mbps >= target_mbps:
             second = once(ip)
             output[ip].append(second)
-            confirmed.add(ip)
+            if second.ok:
+                confirmed.add(ip)
             if second.ok and min(first.complete_mbps, second.complete_mbps) >= target_mbps:
                 early_winner = ip
                 log(f"{family} {ip} 两次 1 秒实测均达到 {target_mbps} Mbps，提前结束")
@@ -525,7 +526,7 @@ def _run_fast_speed_stage(
 
     if not early_winner:
         ranked_first = sorted(
-            (ip for ip in tested if output[ip][0].ok),
+            (ip for ip in tested if output[ip][0].ok and not (len(output[ip]) >= 2 and any(not item.ok for item in output[ip]))),
             key=lambda ip: (
                 -output[ip][0].complete_mbps,
                 -output[ip][0].payload_mbps,
@@ -686,7 +687,7 @@ def run_family(
         )
         for ip in full
     ]
-    ranked = rank(metrics)
+    ranked = rank(metrics) if params.early_stop else rank_maximum(metrics)
     asia_ranked = rank_asia(metrics) if params.asia_hunt else ranked
     actual_bytes = sum(item.bytes_downloaded for item in pre_cache.values())
     actual_bytes += sum(item.bytes_downloaded for samples in full.values() for item in samples)
