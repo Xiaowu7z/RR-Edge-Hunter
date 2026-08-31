@@ -20,15 +20,16 @@ def _parser() -> argparse.ArgumentParser:
     ui.add_argument("--port", type=int, default=0)
     ui.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
 
-    run = sub.add_parser("run", help="在命令行执行 Argo 优选或当前 DNS 体检")
-    run.add_argument("--purpose", choices=("argo", "dns"), default="dns", help="argo=节点入口优选；dns=当前 DNS 快速体检")
-    run.add_argument("--mode", choices=("balanced", "asia"), default="balanced")
-    run.add_argument("--family", choices=("ipv4", "ipv6", "dual"), default="dual")
+    run = sub.add_parser("run", help="在命令行执行独立 CF IP 优选、Argo 高级复核或 DNS 体检")
+    run.add_argument("--purpose", choices=("direct", "argo", "dns"), default="direct", help="direct=独立 CF IP 优选；argo=附加域名兼容复核；dns=当前 DNS 快速体检")
+    run.add_argument("--mode", choices=("balanced", "asia"), default="asia")
+    run.add_argument("--family", choices=("ipv4", "ipv6", "dual"), default="ipv4")
     run.add_argument("--operator", default="自动", help="仅作为当前线路标签记录")
-    run.add_argument("--target-host", default=SPEED_HOST, help="Argo 节点域名，或 DNS 体检的获授权主机")
-    run.add_argument("--node-port", type=int, default=443, help="Argo 节点 TLS 端口")
+    run.add_argument("--target-host", default=SPEED_HOST, help="仅 Argo 高级复核或 DNS 体检使用；direct 模式固定使用 Cloudflare 公共测速端点")
+    run.add_argument("--node-port", type=int, default=443, help="仅用于 Argo 高级兼容复核；吞吐测速始终使用公共端点 443")
     run.add_argument("--ws-path", default="", help="可选 WebSocket 路径，例如 /vless")
-    run.add_argument("--ips", type=Path, help="可选 IP 名单；Argo 模式作为智能池补充，DNS 模式用于交集筛选")
+    run.add_argument("--target-mbps", type=int, default=100, help="达标参考带宽，默认 100 Mbps")
+    run.add_argument("--ips", type=Path, help="可选 IP 名单；direct/Argo 模式作为官方池补充，DNS 模式用于交集筛选")
     run.add_argument("--output", type=Path, default=Path("rr-edge-hunter-result.json"))
     run.add_argument("--csv", type=Path, help="额外导出 CSV")
     return parser
@@ -36,16 +37,19 @@ def _parser() -> argparse.ArgumentParser:
 
 def _write_csv(path: Path, result: dict[str, object]) -> None:
     argo = result.get("purpose") == "argo"
+    node_output = result.get("purpose") in {"direct", "argo"}
+    target_mbps = int(result.get("target_mbps", 100))
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(["family", "rank", "ip", "server", "port", "sni", "host", "ws_path", "round_floor_mbps", "avg_mbps", "success_pct", "variation_pct", "pop", "loc", "rounds"])
+        writer.writerow(["family", "rank", "ip", "server", "target_mbps", "meets_target", "port", "sni", "host", "ws_path", "round_floor_mbps", "avg_mbps", "success_pct", "variation_pct", "pop", "loc", "rounds"])
         for family in result.get("families", []):
             if not isinstance(family, dict):
                 continue
             rows = family.get("asia_ranked" if result.get("mode") == "asia" else "ranked", [])
             for index, row in enumerate(rows, 1):
                 writer.writerow([
-                    family.get("family", ""), index, row.get("ip", ""), row.get("ip", "") if argo else "",
+                    family.get("family", ""), index, row.get("ip", ""), row.get("ip", "") if node_output else "",
+                    target_mbps, "yes" if float(row.get("round_floor_mbps", 0)) >= target_mbps else "no",
                     result.get("node_port", 443) if argo else "", result.get("target_host", "") if argo else "",
                     result.get("target_host", "") if argo else "", result.get("ws_path", "") if argo else "",
                     row.get("round_floor_mbps", 0),
@@ -76,6 +80,7 @@ def _run_command(args: argparse.Namespace) -> int:
             purpose=args.purpose,
             node_port=args.node_port,
             ws_path=args.ws_path,
+            target_mbps=args.target_mbps,
             cancel_event=cancel_event,
             on_stage=stage,
             log=log,

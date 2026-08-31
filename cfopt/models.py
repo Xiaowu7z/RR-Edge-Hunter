@@ -172,11 +172,13 @@ class OptimizerResult:
     elapsed_seconds: float
     cancelled: bool = False
     rejected_ip_count: int = 0
-    purpose: str = "dns"
+    purpose: str = "direct"
+    target_mbps: int = 100
     node_port: int = 443
     ws_path: str = ""
     measurement_host: str = SPEED_HOST
     measurement_port: int = 443
+    network_fingerprints: dict[str, str] = field(default_factory=dict)
     version: str = VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -193,6 +195,7 @@ class OptimizerResult:
             "cancelled": self.cancelled,
             "rejected_ip_count": self.rejected_ip_count,
             "purpose": self.purpose,
+            "target_mbps": self.target_mbps,
             "node_port": self.node_port,
             "ws_path": self.ws_path,
             "measurement_host": self.measurement_host,

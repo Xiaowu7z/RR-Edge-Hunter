@@ -38,6 +38,7 @@ class CoreRulesTest(unittest.TestCase):
         with patch("cfopt.pipeline.network_fingerprint", return_value=("", "")):
             with self.assertRaisesRegex(ValueError, "没有交集"):
                 run_optimizer(
+                    purpose="dns",
                     ips=["104.16.0.2"],
                     resolved_ips=["104.16.0.1"],
                     family="ipv4",
@@ -48,6 +49,7 @@ class CoreRulesTest(unittest.TestCase):
     def test_failed_full_round_forces_ip_floor_zero(self) -> None:
         with patch("cfopt.pipeline.network_fingerprint", return_value=("", "")):
             result = run_optimizer(
+                purpose="dns",
                 ips=["104.16.0.1", "104.16.0.2"],
                 resolved_ips=["104.16.0.1", "104.16.0.2"],
                 family="ipv4",
@@ -64,6 +66,7 @@ class CoreRulesTest(unittest.TestCase):
 
         with patch("cfopt.pipeline.network_fingerprint", return_value=("", "")):
             result = run_optimizer(
+                purpose="dns",
                 mode="asia",
                 ips=["104.16.0.1", "104.16.0.2"],
                 resolved_ips=["104.16.0.1", "104.16.0.2"],
@@ -72,6 +75,75 @@ class CoreRulesTest(unittest.TestCase):
                 trace_fn=lambda ip, *_: ("HKG", "HK") if ip.endswith(".1") else ("NRT", "JP"),
             )
         self.assertEqual(result.families[0].asia_ranked[0].ip, "104.16.0.2")
+
+    def test_direct_mode_uses_fixed_cloudflare_host_without_argo_gate(self) -> None:
+        resolved_hosts: list[str] = []
+
+        def resolver(hostname: str) -> list[str]:
+            resolved_hosts.append(hostname)
+            return ["104.16.0.1"]
+
+        def forbidden_compatibility(*_args, **_kwargs) -> ProbeResult:
+            raise AssertionError("direct 模式不得调用 Argo 兼容门禁")
+
+        with (
+            patch("cfopt.pipeline.network_fingerprint", return_value=("", "")),
+            patch("cfopt.pipeline.sample_official_cloudflare_ips", return_value=[]),
+        ):
+            result = run_optimizer(
+                purpose="direct", target_host="", target_mbps=200,
+                family="ipv4", resolver=resolver, probe_fn=_probe,
+                trace_fn=lambda *_: ("HKG", "HK"), compatibility_fn=forbidden_compatibility,
+            )
+        self.assertEqual(resolved_hosts, ["speed.cloudflare.com"])
+        self.assertEqual(result.target_host, "speed.cloudflare.com")
+        self.assertEqual(result.measurement_host, "speed.cloudflare.com")
+        self.assertEqual(result.measurement_port, 443)
+        self.assertEqual(result.target_mbps, 200)
+        self.assertEqual(result.families[0].ranked[0].ip, "104.16.0.1")
+
+    def test_direct_pool_unions_dns_official_and_imported_cf_without_intersection(self) -> None:
+        def samples(family: str) -> list[str]:
+            return ["104.16.0.2"] if family == "IPv4" else []
+
+        with (
+            patch("cfopt.pipeline.network_fingerprint", return_value=("", "")),
+            patch("cfopt.pipeline.sample_official_cloudflare_ips", side_effect=samples),
+        ):
+            result = run_optimizer(
+                purpose="direct", ips=["104.16.0.3", "8.8.8.8"],
+                resolved_ips=["104.16.0.1"], family="ipv4", probe_fn=_probe,
+                trace_fn=lambda *_: ("HKG", "HK"),
+            )
+        rows = result.families[0].ranked
+        self.assertEqual({row.ip for row in rows}, {"104.16.0.1", "104.16.0.2", "104.16.0.3"})
+        self.assertEqual(result.rejected_ip_count, 1)
+        self.assertIn("Cloudflare 官方 IP 池", result.source_kind)
+
+    def test_direct_download_always_uses_speed_host_and_443(self) -> None:
+        calls: list[tuple[str, int]] = []
+
+        def download(ip: str, _bytes: int, *_args, hostname: str, port: int, **_kwargs) -> ProbeResult:
+            calls.append((hostname, port))
+            return ProbeResult(
+                ok=True, target_ip=ip, actual_remote_address=ip,
+                target_matches_remote=True, cert_verified=True,
+                complete_mbps=120.0, payload_mbps=130.0, ttfb_ms=8.0,
+            )
+
+        with (
+            patch("cfopt.pipeline.network_fingerprint", return_value=("", "")),
+            patch("cfopt.pipeline.sample_official_cloudflare_ips", return_value=[]),
+            patch("cfopt.pipeline.probe_download", side_effect=download),
+        ):
+            result = run_optimizer(
+                purpose="direct", target_host="attacker.example", node_port=8443,
+                resolved_ips=["104.16.0.1"], family="ipv4",
+                trace_fn=lambda *_args, **_kwargs: ("HKG", "HK"),
+            )
+        self.assertTrue(calls)
+        self.assertEqual(set(calls), {("speed.cloudflare.com", 443)})
+        self.assertEqual(result.node_port, 443)
 
     def test_official_pool_sample_is_stable_bounded_and_spread(self) -> None:
         first = sample_official_cloudflare_ips("IPv4", 80)
@@ -117,7 +189,7 @@ class CoreRulesTest(unittest.TestCase):
         self.assertEqual(result.ws_path, "/vless?ed=2048")
         self.assertGreaterEqual(result.rejected_ip_count, 1)
 
-    def test_argo_measurement_uses_selected_cloudflare_https_port(self) -> None:
+    def test_argo_measurement_stays_on_public_speed_endpoint_443(self) -> None:
         calls: list[tuple[str, int]] = []
 
         def download(ip: str, _bytes: int, *_args, hostname: str, port: int, **_kwargs) -> ProbeResult:
@@ -145,9 +217,32 @@ class CoreRulesTest(unittest.TestCase):
                 compatibility_fn=compatible,
                 trace_fn=lambda *_args, **_kwargs: ("HKG", "HK"),
             )
-        self.assertEqual(result.measurement_port, 8443)
+        self.assertEqual(result.measurement_port, 443)
         self.assertTrue(calls)
-        self.assertEqual(set(calls), {("speed.cloudflare.com", 8443)})
+        self.assertEqual(set(calls), {("speed.cloudflare.com", 443)})
+
+    def test_argo_selected_port_is_used_only_by_compatibility_gate(self) -> None:
+        gate_calls: list[tuple[str, int]] = []
+
+        def compatibility(ip: str, *_args, hostname: str, port: int, **_kwargs) -> ProbeResult:
+            gate_calls.append((hostname, port))
+            return ProbeResult(
+                ok=True, target_ip=ip, actual_remote_address=ip,
+                target_matches_remote=True, cert_verified=True,
+            )
+
+        with (
+            patch("cfopt.pipeline.network_fingerprint", return_value=("", "")),
+            patch("cfopt.pipeline.sample_official_cloudflare_ips", return_value=[]),
+            patch("cfopt.pipeline.probe_argo_compatibility", side_effect=compatibility),
+        ):
+            result = run_optimizer(
+                purpose="argo", target_host="argo.example.com", node_port=2053,
+                resolved_ips=["104.16.0.1"], family="ipv4", probe_fn=_probe,
+                trace_fn=lambda *_args, **_kwargs: ("HKG", "HK"),
+            )
+        self.assertEqual(gate_calls, [("argo.example.com", 2053)])
+        self.assertEqual(result.measurement_port, 443)
 
     def test_argo_domain_must_already_resolve_to_cloudflare(self) -> None:
         with self.assertRaisesRegex(ValueError, "未返回 Cloudflare"):

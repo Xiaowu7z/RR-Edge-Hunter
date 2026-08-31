@@ -17,14 +17,28 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
+from .cloudflare_dns import (
+    CloudflareDnsClient,
+    CloudflareDnsError,
+    DnsSyncPlan,
+    DnsSyncResult,
+    normalize_champion_ip,
+    normalize_record_name,
+    normalize_zone_id,
+)
 from .history import load_history, save_history
 from .ip_sources import IpSourceError, MAX_IPS, MAX_SOURCE_BYTES, fetch_ip_subscription, normalize_ip_values, parse_ip_source
 from .models import MODES, OptimizerResult, SPEED_HOST
 from .pipeline import (
     MAX_CANDIDATES_PER_FAMILY,
+    MAX_TARGET_MBPS,
+    MIN_TARGET_MBPS,
     PURPOSE_ARGO,
+    PURPOSE_DIRECT,
     PURPOSE_DNS,
     SUPPORTED_TLS_PORTS,
+    network_fingerprint,
+    network_fingerprint_token,
     normalize_ws_path,
     run_optimizer,
 )
@@ -37,6 +51,94 @@ WEB_DIR = package_root() / "web"
 MAX_REQUEST_BYTES = MAX_SOURCE_BYTES + 64 * 1024
 MIN_AUTOMATION_INTERVAL_MINUTES = 5
 MAX_AUTOMATION_INTERVAL_MINUTES = 1_440
+DNS_PLAN_TTL_SECONDS = 300
+MAX_PENDING_DNS_PLANS = 8
+_DNS_AUTOMATION_GLOBAL_STOP_CODES = frozenset({
+    "auth_failed",
+    "rate_limited",
+    "timeout",
+    "network",
+    "transport",
+    "server_error",
+    "response_too_large",
+    "protocol",
+    "api_rejected",
+    "verification_failed",
+})
+
+
+def _result_champions(result: OptimizerResult) -> dict[str, str]:
+    if result.cancelled:
+        return {}
+    champions: dict[str, str] = {}
+    for family in result.families:
+        if family.invalid:
+            continue
+        rows = family.asia_ranked if result.mode == "asia" else family.ranked
+        if not rows:
+            continue
+        champion = rows[0]
+        required_rounds = MODES.get(result.mode, MODES["balanced"]).full_rounds
+        if (
+            champion.rounds_tested >= required_rounds
+            and champion.round_floor_mbps > 0
+            and champion.success_rate_pct >= 66.0
+        ):
+            champions[family.family] = champion.ip
+    return champions
+
+
+def _network_matches_result(result: OptimizerResult, family: str) -> bool:
+    expected = str(result.network_fingerprints.get(family, ""))
+    if not expected:
+        return False
+    current = network_fingerprint()
+    address = current[1 if family == "IPv6" else 0]
+    return bool(address and secrets.compare_digest(expected, network_fingerprint_token(address)))
+
+
+def _normalize_dns_sync_config(value: object) -> dict[str, str]:
+    if not isinstance(value, dict) or value.get("enabled") is not True:
+        raise IpSourceError("Cloudflare DNS 自动同步配置无效")
+    token = str(value.get("api_token", ""))
+    if not token or token != token.strip() or len(token) > 4_096 or "\r" in token or "\n" in token:
+        raise IpSourceError("Cloudflare API Token 无效")
+    try:
+        zone_id = normalize_zone_id(value.get("zone_id"))
+        record_name = normalize_record_name(value.get("record_name"))
+    except CloudflareDnsError as exc:
+        raise IpSourceError(str(exc)) from exc
+    return {"api_token": token, "zone_id": zone_id, "record_name": record_name}
+
+
+def _inspect_dns_sync(config: dict[str, Any], champion_ip: str) -> DnsSyncPlan:
+    client = CloudflareDnsClient(str(config.get("api_token", "")))
+    return client.inspect_sync(
+        zone_id=str(config.get("zone_id", "")),
+        record_name=str(config.get("record_name", "")),
+        champion_ip=champion_ip,
+    )
+
+
+def _apply_dns_plan(config: dict[str, Any], champion_ip: str, fingerprint: str) -> DnsSyncResult:
+    client = CloudflareDnsClient(str(config.get("api_token", "")))
+    return client.apply_sync(
+        zone_id=str(config.get("zone_id", "")),
+        record_name=str(config.get("record_name", "")),
+        champion_ip=champion_ip,
+        expected_fingerprint=fingerprint,
+        confirm_create=True,
+    )
+
+
+def _apply_dns_sync(config: dict[str, Any], champion_ip: str) -> DnsSyncResult:
+    plan = _inspect_dns_sync(config, champion_ip)
+    if plan.action == "create":
+        raise CloudflareDnsError(
+            "定时 DNS 同步不会静默创建新记录；请先用手动同步查看预览并确认创建",
+            code="automatic_create_forbidden",
+        )
+    return _apply_dns_plan(config, plan.champion_ip, plan.fingerprint)
 
 
 @dataclass
@@ -60,6 +162,12 @@ class RuntimeState:
     automation_config: dict[str, Any] | None = None
     automation_stop_event: threading.Event = field(default_factory=threading.Event)
     automation_worker: threading.Thread | None = None
+    automation_generation: int = 0
+    automation_stop_in_progress: bool = False
+    dns_automation_paused: bool = False
+    dns_write_lock: threading.Lock = field(default_factory=threading.Lock)
+    dns_write_in_progress: bool = False
+    dns_manual_plans: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @staticmethod
     def _public_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -67,6 +175,7 @@ class RuntimeState:
             "mode", "family", "operator", "target_host", "source", "source_ip_count",
             "automation_enabled", "automation_interval_minutes", "traffic_upper_bound_mb",
             "purpose", "node_port", "ws_path",
+            "target_mbps",
         }
         return {key: value for key, value in config.items() if key in visible}
 
@@ -93,6 +202,8 @@ class RuntimeState:
                     "interval_minutes": self.automation_interval_minutes if self.automation_enabled else None,
                     "next_run_at": self._format_timestamp(self.automation_next_run_at),
                     "runs_started": self.automation_runs_started,
+                    "dns_sync_enabled": bool(self.automation_enabled and self.automation_config and self.automation_config.get("_dns_sync")),
+                    "dns_sync_paused": self.dns_automation_paused,
                 },
             }
 
@@ -111,8 +222,16 @@ class RuntimeState:
 
     def start(self, config: dict[str, Any], *, scheduled: bool = False) -> tuple[bool, str]:
         with self.lock:
+            if scheduled and (
+                not self.automation_enabled
+                or config.get("_automation_generation") != self.automation_generation
+                or self.automation_config is None
+            ):
+                return False, "该定时任务已停止或已被新配置替代"
             if self.status in {"running", "stopping"}:
                 return False, "已有任务正在运行"
+            if self.dns_write_in_progress:
+                return False, "Cloudflare DNS 正在同步，请稍候再开始优选"
             if self.automation_enabled and not scheduled:
                 return False, "定时自动优选已启用；请先停止自动任务，再开始临时优选"
             self.status = "running"
@@ -123,6 +242,7 @@ class RuntimeState:
             self.logs = []
             self.result = None
             self.error = ""
+            self.dns_manual_plans.clear()
             self.config = self._public_config(config)
             self.cancel_event = threading.Event()
             self.worker = threading.Thread(target=self._work, args=(config,), name="rr-edge-hunter", daemon=True)
@@ -142,15 +262,16 @@ class RuntimeState:
                 except IpSourceError as exc:
                     self.log(f"IP 订阅刷新失败，继续使用上次已载入快照：{exc}")
             result = run_optimizer(
-                mode=str(run_config.get("mode", "balanced")),
-                family=str(run_config.get("family", "dual")),
+                mode=str(run_config.get("mode", "asia")),
+                family=str(run_config.get("family", "ipv4")),
                 operator=str(run_config.get("operator", "自动")),
                 target_host=str(run_config.get("target_host", SPEED_HOST)),
                 ips=run_config.get("_ips"),
                 source_kind=str(run_config.get("source", "当前 DNS")),
-                purpose=str(run_config.get("purpose", PURPOSE_DNS)),
+                purpose=str(run_config.get("purpose", PURPOSE_DIRECT)),
                 node_port=int(run_config.get("node_port", 443)),
                 ws_path=str(run_config.get("ws_path", "")),
+                target_mbps=int(run_config.get("target_mbps", 100)),
                 cancel_event=self.cancel_event,
                 on_stage=self.on_stage,
                 log=self.log,
@@ -165,6 +286,11 @@ class RuntimeState:
                     save_history(result.to_dict())
                 except OSError as exc:
                     self.log(f"历史记录保存失败：{exc}")
+                dns_sync = run_config.get("_dns_sync")
+                if run_config.get("automation_enabled") and isinstance(dns_sync, dict):
+                    generation = run_config.get("_automation_generation")
+                    if isinstance(generation, int):
+                        self._sync_automatic_champions(result, dns_sync, generation=generation)
         except Exception as exc:
             with self.lock:
                 self.status = "error"
@@ -178,17 +304,87 @@ class RuntimeState:
         with self.lock:
             if self.automation_enabled:
                 return False, "定时自动优选已在运行"
+            if self.automation_stop_in_progress:
+                return False, "正在安全停止上一项定时任务，请稍候"
             if self.status in {"running", "stopping"}:
                 return False, "请等待当前优选结束后再开启定时自动优选"
+            if self.dns_write_in_progress:
+                return False, "Cloudflare DNS 正在同步，请稍候再开启定时自动优选"
+            self.automation_generation += 1
             self.automation_enabled = True
             self.automation_interval_minutes = interval_minutes
             self.automation_next_run_at = time.time()
             self.automation_config = dict(config)
+            self.dns_automation_paused = False
             self.automation_stop_event = threading.Event()
             stop_event = self.automation_stop_event
             self.automation_worker = threading.Thread(target=self._automation_loop, args=(stop_event,), name="rr-edge-hunter-scheduler", daemon=True)
             self.automation_worker.start()
         return True, f"已开启定时自动优选：每 {interval_minutes} 分钟运行一次"
+
+    def _automatic_sync_is_current(
+        self,
+        result: OptimizerResult,
+        dns_sync: dict[str, Any],
+        generation: int,
+    ) -> bool:
+        return bool(
+            self.automation_enabled
+            and self.automation_generation == generation
+            and self.status == "completed"
+            and self.result is result
+            and self.automation_config
+            and self.automation_config.get("_dns_sync") == dns_sync
+        )
+
+    def _sync_automatic_champions(
+        self,
+        result: OptimizerResult,
+        dns_sync: dict[str, Any],
+        *,
+        generation: int,
+    ) -> None:
+        with self.dns_write_lock:
+            with self.lock:
+                if not self._automatic_sync_is_current(result, dns_sync, generation):
+                    self.log("定时任务已停止或结果已过期，跳过旧任务的 DNS 写入")
+                    return
+                if self.dns_automation_paused:
+                    self.log("Cloudflare DNS 自动同步已暂停；测速定时任务继续运行")
+                    return
+                self.dns_write_in_progress = True
+            try:
+                champions = _result_champions(result)
+                if not champions:
+                    self.log("本轮没有有效冠军 IP，未执行 Cloudflare DNS 同步")
+                    return
+                for family, ip in champions.items():
+                    with self.lock:
+                        if not self._automatic_sync_is_current(result, dns_sync, generation):
+                            self.log("定时任务已停止或结果已变化，停止旧任务的 DNS 写入")
+                            return
+                    if not _network_matches_result(result, family):
+                        self.log(f"{family} 网络出口已变化或无法复核，未执行 Cloudflare DNS 自动同步")
+                        continue
+                    try:
+                        changed = _apply_dns_sync(dns_sync, ip)
+                    except CloudflareDnsError as exc:
+                        self.log(f"{family} Cloudflare DNS 自动同步失败：{exc}")
+                        if exc.pause_dns_automation:
+                            with self.lock:
+                                self.dns_automation_paused = True
+                            self.log("鉴权失败：仅暂停 DNS 自动写入，后续定时测速仍会继续")
+                        if exc.pause_dns_automation or exc.code in _DNS_AUTOMATION_GLOBAL_STOP_CODES:
+                            break
+                        continue
+                    except Exception:
+                        self.log("Cloudflare DNS 自动同步发生未预期错误；本轮已安全停止写入")
+                        break
+                    operation = {"created": "已创建", "updated": "已更新", "unchanged": "无需变更"}.get(changed.action, changed.action)
+                    self.log(f"Cloudflare DNS {operation}：{changed.record_type} {changed.record_name} → {ip}（DNS-only）")
+            finally:
+                with self.lock:
+                    self.dns_write_in_progress = False
 
     def _automation_loop(self, stop_event: threading.Event) -> None:
         first_run = True
@@ -205,6 +401,7 @@ class RuntimeState:
                 if not self.automation_enabled or stop_event is not self.automation_stop_event or not self.automation_config:
                     break
                 config = dict(self.automation_config)
+                config["_automation_generation"] = self.automation_generation
                 self.automation_next_run_at = None
             started, message = self.start(config, scheduled=True)
             if not started:
@@ -221,17 +418,31 @@ class RuntimeState:
                 self.automation_next_run_at = None
 
     def stop_automation(self) -> bool:
-        if not self.automation_enabled:
-            return False
-        self.automation_enabled = False
-        self.automation_next_run_at = None
-        self.automation_config = None
-        self.automation_stop_event.set()
+        # Invalidate the generation before waiting for a DNS request already in
+        # flight. The writer checks this state between IPv4/IPv6, so no second
+        # family can be written after stop begins. Never wait for dns_write_lock
+        # while holding state.lock: the writer needs state.lock to observe this.
+        with self.lock:
+            if not self.automation_enabled:
+                return False
+            self.automation_enabled = False
+            self.automation_generation += 1
+            self.automation_next_run_at = None
+            self.automation_config = None
+            self.dns_automation_paused = False
+            self.automation_stop_in_progress = True
+            self.automation_stop_event.set()
+        try:
+            with self.dns_write_lock:
+                pass
+        finally:
+            with self.lock:
+                self.automation_stop_in_progress = False
         return True
 
     def stop(self) -> tuple[bool, str]:
+        stopped_automation = self.stop_automation()
         with self.lock:
-            stopped_automation = self.stop_automation()
             if self.status in {"running", "stopping"}:
                 self.status = "stopping"
                 self.stage = "正在停止"
@@ -245,17 +456,19 @@ class RuntimeState:
 
 def _csv_bytes(result: OptimizerResult) -> bytes:
     argo = result.purpose == PURPOSE_ARGO
+    node_output = result.purpose in {PURPOSE_DIRECT, PURPOSE_ARGO}
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow([
-        "family", "rank", "ip", "server", "port", "sni", "host", "ws_path", "round_floor_mbps", "avg_complete_mbps", "min_complete_mbps",
+        "family", "rank", "ip", "server", "target_mbps", "meets_target", "port", "sni", "host", "ws_path", "round_floor_mbps", "avg_complete_mbps", "min_complete_mbps",
         "success_rate_pct", "variation_pct", "median_ttfb_ms", "pop", "loc", "rounds_tested", "source_tags",
     ])
     for family in result.families:
         rows = family.asia_ranked if result.mode == "asia" else family.ranked
         for index, item in enumerate(rows, 1):
             writer.writerow([
-                family.family, index, item.ip, item.ip if argo else "", result.node_port if argo else "",
+                family.family, index, item.ip, item.ip if node_output else "", result.target_mbps,
+                "yes" if item.round_floor_mbps >= result.target_mbps else "no", result.node_port if argo else "",
                 result.target_host if argo else "", result.target_host if argo else "", result.ws_path if argo else "",
                 f"{item.round_floor_mbps:.3f}", f"{item.avg_complete_mbps:.3f}",
                 f"{item.min_complete_mbps:.3f}", f"{item.success_rate_pct:.1f}", f"{item.variation_pct:.1f}",
@@ -334,33 +547,51 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
         def _run_config(self, body: dict[str, Any]) -> dict[str, Any]:
             if body.get("confirmed") is not True:
                 raise IpSourceError("请确认本轮会产生真实 HTTPS 下载流量")
-            mode = str(body.get("mode", "balanced"))
-            family = str(body.get("family", "dual"))
+            mode = str(body.get("mode", "asia"))
+            family = str(body.get("family", "ipv4"))
             operator = str(body.get("operator", "自动"))[:30]
-            purpose = str(body.get("purpose", PURPOSE_ARGO))
-            if purpose not in {PURPOSE_ARGO, PURPOSE_DNS}:
+            purpose = str(body.get("purpose", PURPOSE_DIRECT))
+            if purpose not in {PURPOSE_DIRECT, PURPOSE_ARGO, PURPOSE_DNS}:
                 raise IpSourceError("用途参数无效")
-            raw_target = str(body.get("target_host", "" if purpose == PURPOSE_ARGO else SPEED_HOST)).strip()[:255]
-            if any(marker in raw_target for marker in ("://", "/", "?", "#", "@")) or ":" in raw_target:
-                raise IpSourceError("请只填写域名，不要填写 IP、URL、端口或路径")
+            if purpose == PURPOSE_DIRECT:
+                target_host = SPEED_HOST
+            else:
+                raw_target = str(body.get("target_host", "" if purpose == PURPOSE_ARGO else SPEED_HOST)).strip()[:255]
+                if any(marker in raw_target for marker in ("://", "/", "?", "#", "@")) or ":" in raw_target:
+                    raise IpSourceError("请只填写域名，不要填写 IP、URL、端口或路径")
+                try:
+                    target_host = normalize_hostname(raw_target)
+                except HostnameError as exc:
+                    label = "Argo 节点域名" if purpose == PURPOSE_ARGO else "测试主机"
+                    raise IpSourceError(f"{label}无效：{exc}") from exc
+            if purpose == PURPOSE_ARGO:
+                raw_port = body.get("node_port", 443)
+                if isinstance(raw_port, bool):
+                    raise IpSourceError("节点端口无效")
+                try:
+                    node_port = int(raw_port)
+                except (TypeError, ValueError) as exc:
+                    raise IpSourceError("节点端口无效") from exc
+                if node_port not in SUPPORTED_TLS_PORTS:
+                    raise IpSourceError("节点端口仅支持 443、2053、2083、2087、2096、8443")
+            else:
+                node_port = 443
+            if purpose == PURPOSE_ARGO:
+                try:
+                    ws_path = normalize_ws_path(body.get("ws_path", ""))
+                except ValueError as exc:
+                    raise IpSourceError(str(exc)) from exc
+            else:
+                ws_path = ""
+            raw_target_mbps = body.get("target_mbps", 100)
+            if isinstance(raw_target_mbps, bool):
+                raise IpSourceError("目标带宽无效")
             try:
-                target_host = normalize_hostname(raw_target)
-            except HostnameError as exc:
-                label = "Argo 节点域名" if purpose == PURPOSE_ARGO else "测试主机"
-                raise IpSourceError(f"{label}无效：{exc}") from exc
-            raw_port = body.get("node_port", 443)
-            if isinstance(raw_port, bool):
-                raise IpSourceError("节点端口无效")
-            try:
-                node_port = int(raw_port)
+                target_mbps = int(raw_target_mbps)
             except (TypeError, ValueError) as exc:
-                raise IpSourceError("节点端口无效") from exc
-            if node_port not in SUPPORTED_TLS_PORTS:
-                raise IpSourceError("节点端口仅支持 443、2053、2083、2087、2096、8443")
-            try:
-                ws_path = normalize_ws_path(body.get("ws_path", ""))
-            except ValueError as exc:
-                raise IpSourceError(str(exc)) from exc
+                raise IpSourceError("目标带宽无效") from exc
+            if not MIN_TARGET_MBPS <= target_mbps <= MAX_TARGET_MBPS:
+                raise IpSourceError(f"目标带宽必须在 {MIN_TARGET_MBPS}–{MAX_TARGET_MBPS} Mbps 之间")
             source = "custom" if body.get("source") == "custom" else "dns"
             if mode not in MODES or family not in {"ipv4", "ipv6", "dual"}:
                 raise IpSourceError("参数无效")
@@ -372,12 +603,15 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 "source": (
                     "智能候选池 + 我的 IP 名单" if source == "custom" and purpose == PURPOSE_ARGO
                     else "智能候选池" if purpose == PURPOSE_ARGO
+                    else "Cloudflare 官方 IP 池 + 我的名单" if source == "custom" and purpose == PURPOSE_DIRECT
+                    else "Cloudflare 官方 IP 池" if purpose == PURPOSE_DIRECT
                     else "我的 IP 名单" if source == "custom"
                     else "当前 DNS"
                 ),
                 "purpose": purpose,
                 "node_port": node_port,
                 "ws_path": ws_path,
+                "target_mbps": target_mbps,
                 "traffic_upper_bound_mb": _traffic_upper_bound_mb(mode, family),
             }
             if source == "custom":
@@ -430,14 +664,19 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 self._json({
                     "version": VERSION,
                     "request_token": request_token,
-                    "default_purpose": PURPOSE_ARGO,
-                    "default_target_host": "",
+                    "default_purpose": PURPOSE_DIRECT,
+                    "default_target_host": SPEED_HOST,
                     "diagnostic_default_target_host": SPEED_HOST,
                     "default_node_port": 443,
                     "supported_tls_ports": sorted(SUPPORTED_TLS_PORTS),
                     "max_custom_ips": MAX_IPS,
                     "max_source_bytes": MAX_SOURCE_BYTES,
                     "candidate_cap_per_family": MAX_CANDIDATES_PER_FAMILY,
+                    "target_mbps": {
+                        "default": 100,
+                        "min": MIN_TARGET_MBPS,
+                        "max": MAX_TARGET_MBPS,
+                    },
                     "automation": {
                         "min_interval_minutes": MIN_AUTOMATION_INTERVAL_MINUTES,
                         "max_interval_minutes": MAX_AUTOMATION_INTERVAL_MINUTES,
@@ -512,10 +751,124 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 ok, message = state.start(config)
                 self._json({"ok": ok, "message": message, "traffic_upper_bound_mb": config["traffic_upper_bound_mb"]}, 200 if ok else HTTPStatus.CONFLICT)
                 return
+            if parsed.path == "/api/dns/inspect":
+                try:
+                    dns_config = _normalize_dns_sync_config({**body, "enabled": True})
+                    normalized_ip, expected_type = normalize_champion_ip(body.get("ip"))
+                except (IpSourceError, CloudflareDnsError) as exc:
+                    self._json({"ok": False, "message": str(exc)}, HTTPStatus.BAD_REQUEST)
+                    return
+                expected_family = "IPv6" if expected_type == "AAAA" else "IPv4"
+                if str(body.get("family", "")) != expected_family:
+                    self._json({"ok": False, "message": "冠军 IP 与协议族不一致"}, HTTPStatus.BAD_REQUEST)
+                    return
+                with state.dns_write_lock:
+                    with state.lock:
+                        current_result = state.result
+                        champions = _result_champions(current_result) if current_result is not None else {}
+                        if state.status != "completed" or champions.get(expected_family) != normalized_ip:
+                            self._json({"ok": False, "message": "该 IP 不是当前稳定有效冠军，请重新优选"}, HTTPStatus.CONFLICT)
+                            return
+                        if not _network_matches_result(current_result, expected_family):
+                            self._json({"ok": False, "message": "当前网络出口与优选时不一致或无法复核，请重新优选"}, HTTPStatus.CONFLICT)
+                            return
+                        result_created_at = current_result.created_at
+                        state.dns_write_in_progress = True
+                    try:
+                        plan = _inspect_dns_sync(dns_config, normalized_ip)
+                    except CloudflareDnsError as exc:
+                        self._json({"ok": False, "message": str(exc)}, HTTPStatus.BAD_GATEWAY)
+                        return
+                    except Exception:
+                        self._json({"ok": False, "message": "Cloudflare DNS 检查发生未预期错误，未执行写入"}, HTTPStatus.BAD_GATEWAY)
+                        return
+                    finally:
+                        with state.lock:
+                            state.dns_write_in_progress = False
+                    with state.lock:
+                        current_result = state.result
+                        champions = _result_champions(current_result) if current_result is not None else {}
+                        if state.status != "completed" or not current_result or current_result.created_at != result_created_at or champions.get(expected_family) != normalized_ip:
+                            self._json({"ok": False, "message": "优选结果在检查期间已变化，请重新操作"}, HTTPStatus.CONFLICT)
+                            return
+                        if not _network_matches_result(current_result, expected_family):
+                            self._json({"ok": False, "message": "网络出口在检查期间发生变化，请重新优选"}, HTTPStatus.CONFLICT)
+                            return
+                        now = time.monotonic()
+                        state.dns_manual_plans = {
+                            key: value for key, value in state.dns_manual_plans.items()
+                            if float(value.get("expires_at", 0)) > now
+                        }
+                        while len(state.dns_manual_plans) >= MAX_PENDING_DNS_PLANS:
+                            state.dns_manual_plans.pop(next(iter(state.dns_manual_plans)))
+                        state.dns_manual_plans[plan.fingerprint] = {
+                            "expires_at": now + DNS_PLAN_TTL_SECONDS,
+                            "result_created_at": result_created_at,
+                            "family": expected_family,
+                            "ip": normalized_ip,
+                            "zone_id": dns_config["zone_id"],
+                            "record_name": dns_config["record_name"],
+                        }
+                self._json({"ok": True, "plan": plan.to_dict()})
+                return
+            if parsed.path == "/api/dns/apply":
+                if body.get("dns_write_confirmed") is not True:
+                    self._json({"ok": False, "message": "请在查看 DNS 变更预览后二次确认"}, HTTPStatus.BAD_REQUEST)
+                    return
+                try:
+                    dns_config = _normalize_dns_sync_config({**body, "enabled": True})
+                    normalized_ip, expected_type = normalize_champion_ip(body.get("ip"))
+                except (IpSourceError, CloudflareDnsError) as exc:
+                    self._json({"ok": False, "message": str(exc)}, HTTPStatus.BAD_REQUEST)
+                    return
+                fingerprint = str(body.get("fingerprint", ""))
+                expected_family = "IPv6" if expected_type == "AAAA" else "IPv4"
+                if str(body.get("family", "")) != expected_family:
+                    self._json({"ok": False, "message": "冠军 IP 与协议族不一致"}, HTTPStatus.BAD_REQUEST)
+                    return
+                with state.dns_write_lock:
+                    with state.lock:
+                        pending = state.dns_manual_plans.pop(fingerprint, None)
+                        current_result = state.result
+                        champions = _result_champions(current_result) if current_result is not None else {}
+                        valid_plan = bool(
+                            pending
+                            and float(pending.get("expires_at", 0)) > time.monotonic()
+                            and pending.get("result_created_at") == (current_result.created_at if current_result else "")
+                            and pending.get("family") == expected_family
+                            and pending.get("ip") == normalized_ip
+                            and pending.get("zone_id") == dns_config["zone_id"]
+                            and pending.get("record_name") == dns_config["record_name"]
+                        )
+                        if state.status != "completed" or not valid_plan or champions.get(expected_family) != normalized_ip:
+                            self._json({"ok": False, "message": "DNS 预览已过期、已使用或不再匹配当前冠军，请重新检查"}, HTTPStatus.CONFLICT)
+                            return
+                        if not current_result or not _network_matches_result(current_result, expected_family):
+                            self._json({"ok": False, "message": "当前网络出口与优选时不一致，请重新优选"}, HTTPStatus.CONFLICT)
+                            return
+                        state.dns_write_in_progress = True
+                    try:
+                        changed = _apply_dns_plan(dns_config, normalized_ip, fingerprint)
+                    except CloudflareDnsError as exc:
+                        self._json({"ok": False, "message": str(exc)}, HTTPStatus.BAD_GATEWAY)
+                        return
+                    except Exception:
+                        self._json({"ok": False, "message": "Cloudflare DNS 同步发生未预期错误，未继续写入"}, HTTPStatus.BAD_GATEWAY)
+                        return
+                    finally:
+                        with state.lock:
+                            state.dns_write_in_progress = False
+                operation = {"created": "已创建", "updated": "已更新", "unchanged": "无需变更"}.get(changed.action, changed.action)
+                self._json({"ok": True, "message": f"{operation} {changed.record_type} 记录（DNS-only）", "result": changed.to_dict()})
+                return
             if parsed.path == "/api/automation/start":
                 try:
                     config = self._run_config(body)
                     interval = self._interval_minutes(body)
+                    if body.get("dns_sync") is not None:
+                        if body.get("dns_write_confirmed") is not True:
+                            raise IpSourceError("请二次确认定时 Cloudflare DNS 自动写入")
+                        config["_dns_sync"] = _normalize_dns_sync_config(body.get("dns_sync"))
                 except IpSourceError as exc:
                     self._json({"ok": False, "message": str(exc)}, HTTPStatus.BAD_REQUEST)
                     return

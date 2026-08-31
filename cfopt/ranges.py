@@ -38,8 +38,8 @@ NETWORKS_V6 = tuple(ipaddress.ip_network(item) for item in FALLBACK_V6)
 
 # Keep the built-in pool bounded.  These are deterministic samples from the
 # published Cloudflare ranges, not an assertion that every sampled address is
-# usable for every zone.  The Argo compatibility pass performs that validation
-# before an address can enter the speed ranking.
+# usable for every zone. Every address still has to pass the live public-speed
+# probes; optional Argo mode adds a separate user-host compatibility gate.
 DEFAULT_OFFICIAL_SAMPLE_LIMIT = 112
 
 

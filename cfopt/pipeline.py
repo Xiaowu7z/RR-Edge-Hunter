@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import functools
+import hashlib
 import socket
 import stat
 import statistics
@@ -30,9 +31,12 @@ ResolveFunction = Callable[[str], list[str]]
 ASIA_POP_ORDER = ("HKG", "NRT", "SIN", "ICN", "TPE")
 POP_PRIORITY = {"HKG": 5, "NRT": 4, "SIN": 3, "ICN": 2, "TPE": 1}
 MAX_CANDIDATES_PER_FAMILY = 128
+PURPOSE_DIRECT = "direct"
 PURPOSE_ARGO = "argo"
 PURPOSE_DNS = "dns"
 SUPPORTED_TLS_PORTS = {443, 2053, 2083, 2087, 2096, 8443}
+MIN_TARGET_MBPS = 1
+MAX_TARGET_MBPS = 10_000
 
 
 class OptimizerCancelled(RuntimeError):
@@ -156,6 +160,51 @@ def _build_argo_candidates(
     label = "智能候选池" if candidates is None else "智能候选池 + 我的 IP 名单"
     log(
         f"Argo 智能候选：当前 DNS {len(cf_resolved)} + 内置官方 CIDR 快照抽样 {len(official)}"
+        + (f" + 导入可用 {len(supplied_cf)}" if candidates is not None else "")
+    )
+    return merged, rejected, label, sources
+
+
+def _build_direct_candidates(
+    candidates: Iterable[str] | None,
+    resolved_ips: Iterable[str],
+    log: LogCallback,
+) -> tuple[list[str], int, str, dict[str, list[str]]]:
+    """Build the normal IP-hunting pool without requiring a user's Argo host.
+
+    The public speed host contributes live DNS seeds, while deterministic,
+    bounded samples from every published Cloudflare CIDR provide broad
+    coverage.  User input can extend that pool, but non-Cloudflare addresses
+    never reach a network probe.
+    """
+    resolved = list(dict.fromkeys(normalized_ip(value) for value in resolved_ips))
+    cf_resolved = [value for value in resolved if is_cloudflare_ip(value)]
+    if not cf_resolved:
+        raise ValueError("Cloudflare 公共测速端点当前 DNS 未返回官方边缘地址")
+
+    official = sample_official_cloudflare_ips("IPv4") + sample_official_cloudflare_ips("IPv6")
+    supplied_cf: list[str] = []
+    rejected = 0
+    if candidates is not None:
+        try:
+            supplied = normalize_ip_values(candidates)
+        except IpSourceError as exc:
+            raise ValueError(str(exc)) from exc
+        supplied_cf = [value for value in supplied if is_cloudflare_ip(value)]
+        rejected = len(supplied) - len(supplied_cf)
+        if rejected:
+            log(f"导入名单中 {rejected} 个非 Cloudflare 官方网段地址已隔离，不会连接")
+
+    merged = list(dict.fromkeys([*cf_resolved, *official, *supplied_cf]))
+    sources: dict[str, list[str]] = {
+        "Cloudflare 测速端点 DNS 种子": cf_resolved,
+        "Cloudflare 官方 CIDR 分散抽样": official,
+    }
+    if candidates is not None:
+        sources["我的 IP 名单（官方网段）"] = supplied_cf
+    label = "Cloudflare 官方 IP 池" if candidates is None else "Cloudflare 官方 IP 池 + 我的名单"
+    log(
+        f"独立优选池：测速端点 DNS 种子 {len(cf_resolved)} + 官方 CIDR 分散抽样 {len(official)}"
         + (f" + 导入可用 {len(supplied_cf)}" if candidates is not None else "")
     )
     return merged, rejected, label, sources
@@ -289,6 +338,13 @@ def network_fingerprint() -> tuple[str, str]:
         source_for(socket.AF_INET, ("1.1.1.1", 53)),
         source_for(socket.AF_INET6, ("2606:4700:4700::1111", 53, 0, 0)),
     )
+
+
+def network_fingerprint_token(value: str) -> str:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return ""
+    return hashlib.sha256(f"rr-edge-hunter:network:v1:{normalized}".encode("utf-8")).hexdigest()
 
 
 def _run_parallel_probes(
@@ -561,21 +617,27 @@ def run_optimizer(
     resolved_ips: Iterable[str] | None = None,
     probe_fn: ProbeFunction | None = None,
     trace_fn: TraceFunction | None = None,
-    purpose: str = PURPOSE_DNS,
+    purpose: str = PURPOSE_DIRECT,
     node_port: int = 443,
     ws_path: str = "",
+    target_mbps: int = 100,
     compatibility_fn: CompatibilityFunction | None = None,
 ) -> OptimizerResult:
     if mode not in MODES:
         raise ValueError(f"未知模式：{mode}")
     if family not in {"ipv4", "ipv6", "dual"}:
         raise ValueError(f"未知协议族：{family}")
-    if purpose not in {PURPOSE_ARGO, PURPOSE_DNS}:
+    if purpose not in {PURPOSE_DIRECT, PURPOSE_ARGO, PURPOSE_DNS}:
         raise ValueError(f"未知用途：{purpose}")
-    if isinstance(node_port, bool) or node_port not in SUPPORTED_TLS_PORTS:
-        raise ValueError("节点端口仅支持 Cloudflare HTTPS 端口：443、2053、2083、2087、2096、8443")
-    target = _normalize_target_host(target_host)
-    normalized_ws_path = normalize_ws_path(ws_path)
+    if purpose == PURPOSE_ARGO:
+        if isinstance(node_port, bool) or node_port not in SUPPORTED_TLS_PORTS:
+            raise ValueError("节点端口仅支持 Cloudflare HTTPS 端口：443、2053、2083、2087、2096、8443")
+    else:
+        node_port = 443
+    if isinstance(target_mbps, bool) or not isinstance(target_mbps, int) or not MIN_TARGET_MBPS <= target_mbps <= MAX_TARGET_MBPS:
+        raise ValueError(f"目标带宽必须在 {MIN_TARGET_MBPS}–{MAX_TARGET_MBPS} Mbps 之间")
+    target = SPEED_HOST if purpose == PURPOSE_DIRECT else _normalize_target_host(target_host)
+    normalized_ws_path = normalize_ws_path(ws_path) if purpose == PURPOSE_ARGO else ""
     cancel = cancel_event or threading.Event()
     stage_callback = on_stage or (lambda _name, _current, _total, _detail: None)
     logger = log or (lambda _message: None)
@@ -583,6 +645,8 @@ def run_optimizer(
     current_ips = list(resolved_ips) if resolved_ips is not None else resolver(target)
     if purpose == PURPOSE_ARGO:
         candidates, rejected_count, actual_source, candidate_sources = _build_argo_candidates(supplied, current_ips, logger)
+    elif purpose == PURPOSE_DIRECT:
+        candidates, rejected_count, actual_source, candidate_sources = _build_direct_candidates(supplied, current_ips, logger)
     else:
         candidates, rejected_count, verified_source = _filter_candidates(supplied, current_ips, logger)
         actual_source = source_kind if supplied is not None else verified_source
@@ -593,8 +657,11 @@ def run_optimizer(
     requested = ["IPv4", "IPv6"] if family == "dual" else ["IPv6" if family == "ipv6" else "IPv4"]
     started = time.perf_counter()
     initial_fingerprint = network_fingerprint()
-    measurement_host = SPEED_HOST if purpose == PURPOSE_ARGO else target
-    measurement_port = node_port if purpose == PURPOSE_ARGO else 443
+    measurement_host = SPEED_HOST if purpose in {PURPOSE_DIRECT, PURPOSE_ARGO} else target
+    # Comparable throughput and POP discovery always use Cloudflare's public
+    # speed endpoint on 443.  In advanced Argo mode the user's node port is
+    # used only by the separate SNI/Host/certificate compatibility gate.
+    measurement_port = 443
     worker_probe = probe_fn or functools.partial(
         probe_download, hostname=measurement_host, port=measurement_port
     )
@@ -661,10 +728,15 @@ def run_optimizer(
         cancelled=cancelled,
         rejected_ip_count=rejected_count,
         purpose=purpose,
+        target_mbps=target_mbps,
         node_port=node_port,
         ws_path=normalized_ws_path,
         measurement_host=measurement_host,
         measurement_port=measurement_port,
+        network_fingerprints={
+            "IPv4": network_fingerprint_token(initial_fingerprint[0]),
+            "IPv6": network_fingerprint_token(initial_fingerprint[1]),
+        },
     )
 
 
@@ -672,11 +744,17 @@ __all__ = [
     "ASIA_HUNT",
     "BALANCED",
     "MAX_CANDIDATES_PER_FAMILY",
+    "MAX_TARGET_MBPS",
+    "MIN_TARGET_MBPS",
+    "PURPOSE_ARGO",
+    "PURPOSE_DIRECT",
+    "PURPOSE_DNS",
     "build_snapshot",
     "estimate_traffic_upper_bound_mb",
     "full_schedule",
     "load_ips",
     "network_fingerprint",
+    "network_fingerprint_token",
     "normalize_ws_path",
     "resolve_target_ips",
     "run_family",
