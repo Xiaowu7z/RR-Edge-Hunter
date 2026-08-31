@@ -75,9 +75,18 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage, $output | Out-Null
           Expand-Archive -LiteralPath $archive -DestinationPath $stage -Force
           $source = Join-Path $stage 'CF-IP-Optimizer'
-          if (-not (Test-Path (Join-Path $source 'CF-IP-Optimizer.exe'))) {
+          $portableExe = Join-Path $source 'CF-IP-Optimizer.exe'
+          if (-not (Test-Path $portableExe)) {
             throw 'Installer source executable is missing'
           }
+          $portableHelp = Start-Process -FilePath $portableExe -ArgumentList '--help' -Wait -PassThru
+          if ($portableHelp.ExitCode -ne 0) { throw "Portable application smoke test failed with exit code $($portableHelp.ExitCode)" }
+
+          $portableSha = Join-Path $PWD 'dist\CF-IP-Optimizer-Windows-x64.sha256'
+          if (-not (Test-Path $portableSha)) { throw 'Portable application checksum is missing' }
+          $expectedPortableHash = ((Get-Content -LiteralPath $portableSha -Raw).Trim() -split '\s+')[0].ToLowerInvariant()
+          $actualPortableHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          if ($actualPortableHash -ne $expectedPortableHash) { throw 'Portable application checksum verification failed' }
 
           $compiler = Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6\ISCC.exe'
           & $compiler "/DMyAppVersion=1.0.0" "/DMySourceDir=$source" "/DMyOutputDir=$output" '.github\installer.iss'
@@ -95,7 +104,7 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setup).Hash.ToLowerInvariant()
           "$hash  CF-IP-Optimizer-Setup.exe" | Set-Content -Encoding ascii (Join-Path $output 'CF-IP-Optimizer-Setup.exe.sha256')
 
-      - name: Replace old releases with the latest stable installer
+      - name: Replace old releases with the latest stable Windows packages
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -106,7 +115,7 @@ jobs:
           printf '%s\n\n%s\n\n%s\n' \
             "CF 优选IP Windows 正式版 1.0.0" \
             "构建提交：\`$GITHUB_SHA\`" \
-            "包含直接 IP 优选、亚洲狩猎、IPv4/IPv6、定时运行，以及冠军 IP 同步到 Cloudflare A/AAAA 灰云记录。" \
+            "同时提供安装版与免安装便携版；包含直接 IP 优选、亚洲狩猎、IPv4/IPv6、定时运行，以及冠军 IP 同步到 Cloudflare A/AAAA 灰云记录。" \
             > "$NOTES_FILE"
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
@@ -123,6 +132,8 @@ jobs:
           gh release create "$TAG" \
             release-dist/CF-IP-Optimizer-Setup.exe \
             release-dist/CF-IP-Optimizer-Setup.exe.sha256 \
+            dist/CF-IP-Optimizer-Windows-x64.zip \
+            dist/CF-IP-Optimizer-Windows-x64.sha256 \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "CF 优选IP Windows 1.0.0" \
