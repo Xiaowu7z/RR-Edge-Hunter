@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+rr-optimizer-result.json
+rr-optimizer-result.csv
+rr-edge-hunter-result.json
+rr-edge-hunter-result.csv
+result.json
+result.csv
+dist/
+.DS_Store
+
+# Local secrets and signing material
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*.jks
+*.keystore
+credentials*.json
+secrets/
