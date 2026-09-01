@@ -160,6 +160,8 @@ input[type="radio"] { position: absolute; opacity: 0; pointer-events: none; }
 .field-note, .traffic-note { margin: 11px 0 0; color: var(--muted); font-size: 11px; }
 
 .mode-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.mode-grid.single { grid-template-columns: 1fr; }
+.mode-grid.single .mode-card { cursor: default; }
 .mode-card { cursor: pointer; }
 .mode-content { min-height: 132px; display: flex; flex-direction: column; padding: 15px; border: 1px solid var(--line); border-radius: 15px; background: rgba(7, 9, 20, .66); transition: .2s ease; }
 .mode-card input:checked + .mode-content { border-color: rgba(150,124,255,.5); background: linear-gradient(145deg, rgba(150,124,255,.14), rgba(9,12,25,.84)); box-shadow: inset 0 0 0 1px rgba(150,124,255,.08); }

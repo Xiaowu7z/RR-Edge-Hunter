@@ -80,11 +80,11 @@ function currentValue(name) {
 }
 
 function selectedMode() {
-  return currentValue("mode") || "asia";
+  return currentValue("mode") || "reference";
 }
 
 function modeLabel(mode) {
-  return ({ asia: "亚洲狩猎", max: "最大带宽", balanced: "均衡模式" })[mode] || "均衡模式";
+  return ({ reference: "快速优选", asia: "亚洲狩猎", max: "最大带宽", balanced: "均衡模式" })[mode] || "快速优选";
 }
 
 function currentPurpose() {
@@ -104,7 +104,7 @@ function updateArgoValidation() {
   const enabled = argoValidationEnabled.checked;
   argoValidationPanel.hidden = !enabled;
   targetHost.required = enabled;
-  metricIdentityValue.textContent = enabled ? "我的 Argo 域名（高级复核）" : "speed.cloudflare.com";
+  metricIdentityValue.textContent = enabled ? "动态测速端点 + 我的 Argo 域名" : "在线动态测速端点";
 }
 
 function updateSourcePanel() {
@@ -112,7 +112,7 @@ function updateSourcePanel() {
   if (!sourceIsCustom()) {
     customIps = [];
     loadedSubscriptionUrl = "";
-    setCustomStatus("使用测速端点 DNS 种子 + Cloudflare 官方 CIDR 分散抽样。", "ready");
+    setCustomStatus("使用公开维护网段；自动缓存，在线更新失败时回退上次缓存或 Cloudflare 官方网段。", "ready");
   }
 }
 
@@ -124,9 +124,7 @@ function updateDnsSync() {
 function updatePoolHint(config) {
   const mode = config.modes?.[selectedMode()];
   if (!mode) return;
-  const cap = config.candidate_cap_per_family ? ` · 每族上限 ${config.candidate_cap_per_family}` : "";
-  const stop = mode.early_stop === false ? "全部测速" : "达标早停";
-  poolCount.textContent = `并发快筛 ${cap} · 1 秒测速前 ${mode.micro_candidates} · 复测前 ${mode.final_candidates} · ${stop}`;
+  poolCount.textContent = `每轮 100 IP · 50 并发 × 3 次 · 最低延迟 10 个 · 达标即停`;
 }
 
 function estimateTrafficMb(modeName, family) {
@@ -135,6 +133,7 @@ function estimateTrafficMb(modeName, family) {
   const families = family === "dual" ? 2 : 1;
   const cap = Number(window.rrConfig?.candidate_cap_per_family || 100);
   const target = Math.max(1, Math.min(10000, Number(targetMbps.value || 100)));
+  if (modeName === "reference") return target * 125_000 * 5 * families / 1_000_000;
   const requestFloor = modeName === "max" ? 64_000_000 : 4_000_000;
   const requestBytes = Math.min(256_000_000, Math.max(requestFloor, Math.ceil(target * 125_000 * 1.5)));
   const shortlist = Math.min(cap, Number(mode.micro_candidates || 10));
@@ -164,10 +163,9 @@ function updateAutomationChoice() {
   const interval = Number.parseInt(automationInterval.value, 10) || min;
   const perRunMb = estimateTrafficMb(selectedMode(), currentValue("family"));
   if (enabled) {
-    const dailyMb = perRunMb === null ? null : automationDailyUpperBoundMb(interval, perRunMb);
     automationStatus.textContent = `首次立即运行；后续每 ${interval} 分钟重测一次。`;
     automationForecast.hidden = false;
-    automationForecast.innerHTML = `<b>自动任务流量上限</b>：每轮约 ${formatDataAmountMb(perRunMb)}；按 ${interval} 分钟间隔计算，理论 24 小时上限约 ${formatDataAmountMb(dailyMb)}。实际因每轮耗时而更低。`;
+    automationForecast.innerHTML = `<b>首个候选即达标时的估算</b>：每次约 ${formatDataAmountMb(perRunMb)}；若候选未达标或自动换轮，实际流量会增加。`;
   } else {
     automationStatus.textContent = "定时自动优选未开启";
     automationForecast.hidden = true;
@@ -268,8 +266,8 @@ function renderResult(result) {
   if (!families.length) return;
   resultSection.hidden = false;
   const argoVerified = result.purpose === "argo";
-  resultKicker.textContent = argoVerified ? "CF IP RANKING · ARGO VERIFIED" : "CLOUDFLARE IP RANKING";
-  resultTitle.textContent = "可直接填入节点地址的 IP";
+  resultKicker.textContent = argoVerified ? "CF IP RESULT · ARGO VERIFIED" : "CLOUDFLARE IP RESULT";
+  resultTitle.textContent = "首个达到目标带宽的 IP";
   resultDescription.textContent = argoVerified
     ? "候选已通过你提供的 Argo 域名兼容复核。仍只替换 address / server；节点原端口、SNI、Host 与 Path 保持不变。"
     : "复制 IP 后只替换节点 address / server；节点原端口、SNI、Host、传输协议与 WS Path 保持不变。";
@@ -286,22 +284,26 @@ function renderResult(result) {
   const rows = familyRows(result, activeFamily);
   const winner = rows[0];
   if (!winner) {
-    winnerCard.innerHTML = "<div class=\"winner-domain\"><small>NO RESULT</small><h3>没有可完成多轮复核的 IP</h3><p>检查协议栈、网络出口或换用均衡模式后重试。</p></div>";
+    winnerCard.innerHTML = "<div class=\"winner-domain\"><small>NO RESULT</small><h3>本轮没有达标结果</h3><p>任务会自动换一批继续；如果你主动停止，请降低目标带宽后重试。</p></div>";
     resultRows.innerHTML = "";
     return;
   }
   const target = Number(result.target_mbps || 100);
   const meetsTarget = Number(winner.round_floor_mbps || 0) >= target;
+  const peakKbps = Number(winner.peak_kbps || Math.round(Number(winner.avg_complete_mbps || 0) * 128));
+  const tcpLatency = Number(winner.latency_ms || winner.median_ttfb_ms || 0);
   winnerCard.innerHTML = `
-    <div class="winner-domain"><small>TOP 01 · ${escapeHtml(activeFamily)}</small><h3>${escapeHtml(winner.ip)}</h3><p>${escapeHtml(winner.pop || "POP 未知")} · ${escapeHtml(winner.stability || "待评估")} · ${Number(winner.rounds_tested || 0)} 轮完整复核</p><div class="winner-actions"><button type="button" class="mini-button primary-copy" data-winner-ip>复制 IP</button><button type="button" class="mini-button" data-winner-dns>解析到我的域名（DNS-only）</button></div></div>
-    <div class="winner-stat"><small>复核底线</small><strong>${formatMbps(winner.round_floor_mbps)}</strong><em>任一失败即为 0</em></div>
-    <div class="winner-stat"><small>平均速度</small><strong>${formatMbps(winner.avg_complete_mbps)}</strong><em>TTFB ${winner.median_ttfb_ms >= 0 ? `${Number(winner.median_ttfb_ms).toFixed(0)} ms` : "—"}</em></div>
-    <div class="winner-stat"><small>目标 ${target} Mbps</small><strong>${meetsTarget ? "已达标" : "未达标"}</strong><em>${Number(winner.success_rate_pct || 0).toFixed(1)}% 成功率</em></div>`;
+    <div class="winner-domain"><small>WINNER · ${escapeHtml(activeFamily)} · 第 ${Number(winner.scan_round || 1)} 轮</small><h3>${escapeHtml(winner.ip)}</h3><p>${escapeHtml(winner.data_center || winner.loc || winner.pop || "数据中心未知")} · ${result.use_tls === false ? "非 TLS 80" : "TLS 443"}</p><div class="winner-actions"><button type="button" class="mini-button primary-copy" data-winner-ip>复制 IP</button><button type="button" class="mini-button" data-winner-dns>解析到我的域名（DNS-only）</button></div></div>
+    <div class="winner-stat"><small>实测带宽</small><strong>${formatMbps(winner.avg_complete_mbps)}</strong><em>目标 ${target} Mbps</em></div>
+    <div class="winner-stat"><small>完整一秒峰值</small><strong>${peakKbps.toFixed(0)} kB/s</strong><em>末尾不足一秒不计</em></div>
+    <div class="winner-stat"><small>TCP 延迟</small><strong>${tcpLatency.toFixed(0)} ms</strong><em>${meetsTarget ? "已达标" : "未达标"}</em></div>`;
   resultRows.innerHTML = rows.map((row, index) => {
     const rowMeetsTarget = Number(row.round_floor_mbps || 0) >= target;
-    return `<tr><td><div class="rank-domain"><span class="rank-number">${index + 1}</span><div><strong>${escapeHtml(row.ip)}</strong><small>${escapeHtml(row.family)} · ${Number(row.rounds_tested || 0)} 轮 · ${rowMeetsTarget ? "已达标" : "未达标"}</small><div class="row-actions"><button type="button" class="copy-button" data-copy-ip="${escapeHtml(row.ip)}">复制 IP</button></div></div></div></td>
-      <td class="speed-cell"><strong>${formatMbps(row.round_floor_mbps)}</strong><small>最低轮次</small></td><td class="speed-cell"><strong>${formatMbps(row.avg_complete_mbps)}</strong><small>最高 ${formatMbps(row.max_complete_mbps)}</small></td>
-      <td><span class="quality-pill">${Number(row.success_rate_pct || 0).toFixed(1)}%</span></td><td>${Number(row.variation_pct || 0).toFixed(1)}%</td><td><span class="pop-pill">${escapeHtml(row.pop || "UNKNOWN")}</span><br><small>${escapeHtml(row.loc || "")}</small></td><td class="address-cell">${escapeHtml((row.source_tags || []).join(" / ") || "Cloudflare 官方 IP 池")}</td></tr>`;
+    const rowPeak = Number(row.peak_kbps || Math.round(Number(row.avg_complete_mbps || 0) * 128));
+    const rowLatency = Number(row.latency_ms || row.median_ttfb_ms || 0);
+    return `<tr><td><div class="rank-domain"><span class="rank-number">${index + 1}</span><div><strong>${escapeHtml(row.ip)}</strong><small>${escapeHtml(row.family)} · ${rowMeetsTarget ? "已达标" : "未达标"}</small><div class="row-actions"><button type="button" class="copy-button" data-copy-ip="${escapeHtml(row.ip)}">复制 IP</button></div></div></div></td>
+      <td class="speed-cell"><strong>${formatMbps(row.avg_complete_mbps)}</strong><small>目标 ${target} Mbps</small></td><td class="speed-cell"><strong>${rowPeak.toFixed(0)} kB/s</strong><small>完整 1 秒窗口</small></td>
+      <td><span class="quality-pill">${rowLatency.toFixed(0)} ms</span></td><td>第 ${Number(row.scan_round || 1)} 轮</td><td><span class="pop-pill">${escapeHtml(row.pop || "UNKNOWN")}</span><br><small>${escapeHtml(row.data_center || row.loc || "")}</small></td><td class="address-cell">${escapeHtml((row.source_tags || []).join(" / ") || "在线维护 IP 池")}</td></tr>`;
   }).join("");
   winnerCard.querySelector("[data-winner-ip]")?.addEventListener("click", () => copyText(winner.ip, "已复制 IP；请只替换节点 address / server"));
   winnerCard.querySelector("[data-winner-dns]")?.addEventListener("click", () => syncWinner(winner.ip, activeFamily));
@@ -487,6 +489,7 @@ form.addEventListener("submit", async (event) => {
     node_port: argo ? Number.parseInt(nodePort.value, 10) : 443,
     ws_path: argo ? wsPath.value.trim() : "",
     target_mbps: parsedTarget,
+    use_tls: currentValue("useTls") !== "false",
     source: sourceIsCustom() ? "custom" : "dns",
     ips: customIps,
     subscription_url: sourceIsCustom() ? loadedSubscriptionUrl : "",
@@ -505,8 +508,8 @@ form.addEventListener("submit", async (event) => {
   const perRunMb = estimateTrafficMb(payload.mode, payload.family);
   const estimate = formatDataAmountMb(perRunMb);
   const confirmation = automated
-    ? `将立即开始，并在每轮完成后等待 ${payload.interval_minutes} 分钟再重测。每轮最高计划流量约 ${estimate}；按此间隔的理论 24 小时上限约 ${formatDataAmountMb(automationDailyUpperBoundMb(payload.interval_minutes, perRunMb))}。是否开启？`
-    : `本轮会进行真实 HTTPS 下载，最高计划流量约 ${estimate}。是否开始？`;
+    ? `将立即开始，并在每次找到达标 IP 后等待 ${payload.interval_minutes} 分钟再重测。若首个下载候选达标，约使用 ${estimate}；未达标会继续测速并自动换轮，实际流量会增加。是否开启？`
+    : `本轮会进行真实下载。若首个下载候选达标，约使用 ${estimate}；未达标会继续测试并自动换轮，直到找到达标 IP 或你点击停止。是否开始？`;
   if (!window.confirm(confirmation)) return;
   if (payload.dns_sync) {
     if (!window.confirm(`定时同步二次确认：每轮优选成功后，将冠军 IPv4/IPv6 写入 ${payload.dns_sync.record_name} 的 A/AAAA 记录，并强制 DNS-only。是否授权？`)) return;

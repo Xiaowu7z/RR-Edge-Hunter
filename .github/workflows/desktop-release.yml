@@ -86,7 +86,7 @@ jobs:
           printf '%s\n\n%s\n\n%s\n' \
             "CF 优选IP Windows 正式版 1.0.0" \
             "构建提交：\`$GITHUB_SHA\`" \
-            "仅提供免安装便携版，解压后运行 CF-IP-Optimizer.exe；包含快速真实下载测速、均衡/亚洲狩猎/最大带宽、IPv4/IPv6、定时运行，以及冠军 IP 同步到 Cloudflare A/AAAA 灰云记录。" \
+            "仅提供免安装便携版，解压后运行 CF-IP-Optimizer.exe；包含在线维护池、100 IP 三次 RTT 快筛、最低延迟 10 个逐个 5 秒真实下载、TLS/非 TLS、IPv4/IPv6、定时运行，以及达标 IP 同步到 Cloudflare A/AAAA 灰云记录。" \
             > "$NOTES_FILE"
 
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then

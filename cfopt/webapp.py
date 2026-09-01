@@ -175,7 +175,7 @@ class RuntimeState:
             "mode", "family", "operator", "target_host", "source", "source_ip_count",
             "automation_enabled", "automation_interval_minutes", "traffic_upper_bound_mb",
             "purpose", "node_port", "ws_path",
-            "target_mbps",
+            "target_mbps", "use_tls",
         }
         return {key: value for key, value in config.items() if key in visible}
 
@@ -262,7 +262,7 @@ class RuntimeState:
                 except IpSourceError as exc:
                     self.log(f"IP 订阅刷新失败，继续使用上次已载入快照：{exc}")
             result = run_optimizer(
-                mode=str(run_config.get("mode", "asia")),
+                mode=str(run_config.get("mode", "reference")),
                 family=str(run_config.get("family", "ipv4")),
                 operator=str(run_config.get("operator", "自动")),
                 target_host=str(run_config.get("target_host", SPEED_HOST)),
@@ -272,6 +272,7 @@ class RuntimeState:
                 node_port=int(run_config.get("node_port", 443)),
                 ws_path=str(run_config.get("ws_path", "")),
                 target_mbps=int(run_config.get("target_mbps", 100)),
+                use_tls=bool(run_config.get("use_tls", True)),
                 cancel_event=self.cancel_event,
                 on_stage=self.on_stage,
                 log=self.log,
@@ -460,8 +461,9 @@ def _csv_bytes(result: OptimizerResult) -> bytes:
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow([
-        "family", "rank", "ip", "server", "target_mbps", "meets_target", "port", "sni", "host", "ws_path", "round_floor_mbps", "avg_complete_mbps", "min_complete_mbps",
-        "success_rate_pct", "variation_pct", "median_ttfb_ms", "pop", "loc", "rounds_tested", "source_tags",
+        "family", "rank", "ip", "server", "target_mbps", "meets_target", "port", "sni", "host", "ws_path",
+        "peak_kbps", "tcp_latency_ms", "scan_round", "data_center", "transport", "measurement_host", "measurement_port",
+        "round_floor_mbps", "avg_complete_mbps", "min_complete_mbps", "success_rate_pct", "variation_pct", "median_ttfb_ms", "pop", "loc", "rounds_tested", "source_tags",
     ])
     for family in result.families:
         rows = family.asia_ranked if result.mode == "asia" else family.ranked
@@ -470,6 +472,8 @@ def _csv_bytes(result: OptimizerResult) -> bytes:
                 family.family, index, item.ip, item.ip if node_output else "", result.target_mbps,
                 "yes" if item.round_floor_mbps >= result.target_mbps else "no", result.node_port if argo else "",
                 result.target_host if argo else "", result.target_host if argo else "", result.ws_path if argo else "",
+                item.peak_kbps, item.latency_ms, item.scan_round, item.data_center,
+                "TLS" if item.use_tls else "plain HTTP", result.measurement_host, result.measurement_port,
                 f"{item.round_floor_mbps:.3f}", f"{item.avg_complete_mbps:.3f}",
                 f"{item.min_complete_mbps:.3f}", f"{item.success_rate_pct:.1f}", f"{item.variation_pct:.1f}",
                 f"{item.median_ttfb_ms:.1f}", item.pop, item.loc, item.rounds_tested, " | ".join(item.source_tags),
@@ -478,6 +482,13 @@ def _csv_bytes(result: OptimizerResult) -> bytes:
 
 
 def _traffic_upper_bound_mb(mode: str, family: str, target_mbps: int = 100) -> float:
+    if mode == "reference":
+        # Reference mode repeats fresh rounds until a hit.  A true hard upper
+        # bound therefore does not exist; expose the useful first-speed-test
+        # estimate instead of pretending all ten candidates always download
+        # for five seconds.
+        first_hit = max(1, target_mbps) * 125_000 * 5 / 1_000_000.0
+        return round(first_hit * (2 if family == "dual" else 1), 1)
     params = MODES[mode]
     shortlist = min(MAX_CANDIDATES_PER_FAMILY, params.micro_candidates)
     request_floor = 64_000_000 if not params.early_stop else 4_000_000
@@ -552,7 +563,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
         def _run_config(self, body: dict[str, Any]) -> dict[str, Any]:
             if body.get("confirmed") is not True:
                 raise IpSourceError("请确认本轮会产生真实 HTTPS 下载流量")
-            mode = str(body.get("mode", "asia"))
+            mode = str(body.get("mode", "reference"))
             family = str(body.get("family", "ipv4"))
             operator = str(body.get("operator", "自动"))[:30]
             purpose = str(body.get("purpose", PURPOSE_DIRECT))
@@ -600,16 +611,19 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
             source = "custom" if body.get("source") == "custom" else "dns"
             if mode not in MODES or family not in {"ipv4", "ipv6", "dual"}:
                 raise IpSourceError("参数无效")
+            raw_use_tls = body.get("use_tls", True)
+            if not isinstance(raw_use_tls, bool):
+                raise IpSourceError("TLS 模式参数无效")
             config: dict[str, Any] = {
                 "mode": mode,
                 "family": family,
                 "operator": operator,
                 "target_host": target_host,
                 "source": (
-                    "智能候选池 + 我的 IP 名单" if source == "custom" and purpose == PURPOSE_ARGO
-                    else "智能候选池" if purpose == PURPOSE_ARGO
-                    else "Cloudflare 官方 IP 池 + 我的名单" if source == "custom" and purpose == PURPOSE_DIRECT
-                    else "Cloudflare 官方 IP 池" if purpose == PURPOSE_DIRECT
+                    "在线维护 IP 池 + 我的名单" if source == "custom" and purpose == PURPOSE_ARGO
+                    else "在线维护 IP 池" if purpose == PURPOSE_ARGO
+                    else "在线维护 IP 池 + 我的名单" if source == "custom" and purpose == PURPOSE_DIRECT
+                    else "在线维护 IP 池" if purpose == PURPOSE_DIRECT
                     else "我的 IP 名单" if source == "custom"
                     else "当前 DNS"
                 ),
@@ -617,6 +631,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 "node_port": node_port,
                 "ws_path": ws_path,
                 "target_mbps": target_mbps,
+                "use_tls": raw_use_tls,
                 "traffic_upper_bound_mb": _traffic_upper_bound_mb(mode, family, target_mbps),
             }
             if source == "custom":
