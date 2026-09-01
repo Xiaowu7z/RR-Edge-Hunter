@@ -30,6 +30,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: "1.24.13"
+          cache: false
+
       - name: Set up Node.js 20
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -44,20 +50,15 @@ jobs:
           python -m py_compile rr_optimizer.py cfopt/*.py tools/build_release.py tools/build_portable_release.py
           node --check web/app.js
 
-      - name: Fetch pinned official Xray core
+      - name: Verify and compile the pinned reference program
         shell: bash
         run: |
           set -euo pipefail
-          ARCHIVE="${RUNNER_TEMP}/Xray-windows-64-v26.7.28.zip"
-          curl --fail --location --retry 3 \
-            https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-windows-64.zip \
-            --output "$ARCHIVE"
-          echo "c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1  $ARCHIVE" | sha256sum --check --strict
+          echo "83663f1e2655943ebae2d99d520a35f8c5dd58142ac58cf2169220e35deb11ab  third_party/better-cloudflare-ip/main.go" |
+            sha256sum --check --strict
           mkdir -p runtime
-          unzip -p "$ARCHIVE" xray.exe > runtime/xray.exe
-          unzip -p "$ARCHIVE" LICENSE > runtime/Xray-core-LICENSE.txt
-          test -s runtime/xray.exe
-          test -s runtime/Xray-core-LICENSE.txt
+          go build -trimpath -ldflags="-s -w" -o runtime/better-cloudflare-ip.exe ./third_party/better-cloudflare-ip/main.go
+          test -s runtime/better-cloudflare-ip.exe
 
       - name: Build self-contained Windows application
         shell: bash
@@ -67,8 +68,7 @@ jobs:
           python tools/build_portable_release.py \
             --version 1.0.0 \
             --target Windows-x64 \
-            --xray-exe runtime/xray.exe \
-            --xray-license runtime/Xray-core-LICENSE.txt
+            --engine-exe runtime/better-cloudflare-ip.exe
 
       - name: Smoke-test portable Windows package
         shell: pwsh
@@ -85,10 +85,11 @@ jobs:
           if (-not (Test-Path $portableExe)) {
             throw 'Portable application executable is missing'
           }
-          $xrayExe = Join-Path $source 'xray\xray.exe'
-          if (-not (Test-Path $xrayExe)) { throw 'Bundled Xray core is missing' }
-          $xrayVersion = & $xrayExe version | Out-String
-          if ($LASTEXITCODE -ne 0 -or $xrayVersion -notmatch 'Xray') { throw 'Bundled Xray core smoke test failed' }
+          $engineExe = Join-Path $source '_internal\reference-engine\better-cloudflare-ip.exe'
+          if (-not (Test-Path $engineExe)) { throw 'Bundled reference engine is missing' }
+          $manifest = Get-Content -LiteralPath (Join-Path $PWD 'dist\CF-IP-Optimizer-Windows-x64.manifest.json') -Raw | ConvertFrom-Json
+          $engineHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $engineExe).Hash.ToLowerInvariant()
+          if ($engineHash -ne $manifest.reference_engine_sha256) { throw 'Bundled reference engine hash mismatch' }
           $portableHelp = Start-Process -FilePath $portableExe -ArgumentList '--help' -Wait -PassThru
           if ($portableHelp.ExitCode -ne 0) { throw "Portable application smoke test failed with exit code $($portableHelp.ExitCode)" }
 
@@ -109,7 +110,7 @@ jobs:
           printf '%s\n\n%s\n\n%s\n' \
             "CF 优选IP Windows 正式版 1.0.0" \
             "构建提交：\`$GITHUB_SHA\`" \
-            "仅提供免安装便携版，解压后运行 CF-IP-Optimizer.exe；内置官方 Xray-core，候选必须用完整 VMess/VLESS 节点通过 V2rayNG/libXray 同口径的 5 秒 HEAD generate_204 门禁；同时包含真实下载测速、IPv4/IPv6、定时运行与 Cloudflare A/AAAA 灰云同步。" \
+            "仅提供免安装便携版，解压后运行 CF-IP-Optimizer.exe；测速完整调用固定的 better-cloudflare-ip 原版程序，无需节点链接。支持单次及 1/2/4/6/12/24 小时自动测试，每轮只保留并可解析 1 个 IP。" \
             > "$NOTES_FILE"
 
           while IFS= read -r OLD_TAG; do

@@ -1,38 +1,21 @@
-# 安全策略 / Security Policy
-
-## 报告安全问题
-
-请勿在公开 Issue、截图或日志中粘贴 Cloudflare API Token、Zone ID 与域名组合、节点链接、订阅地址或本地网络信息。请使用 GitHub Private Vulnerability Reporting，或通过仓库列出的项目频道联系维护者。
+# 安全说明
 
 ## 测速边界
 
-- 主流程要求用户粘贴一个自己已有且获授权的 VMess/VLESS WS+TLS 节点。完整配置（含 UUID 等凭据）只保留在本次程序内存，不进入设置、日志、历史、导出或错误文本。
-- 导入 IP 不必与动态测速域名当前 DNS 求交，也不要求预先属于 Cloudflare 官方 CIDR；非公网、私网、回环、链路本地、保留地址和错误协议族会被拒绝。
-- 每轮最多 100 个候选、50 并发预检、延迟前 10 个逐个最多下载 5 秒。未达标会进入下一轮，因此总轮数与总流量由用户停止操作和实际网络结果决定。
-- TLS 443 模式保留系统证书、SNI、Host 与实际 TCP 对端验证；非 TLS 80 必须由用户显式选择。探针不继承系统 HTTP 代理。
-- 达标候选必须只替换完整 Xray 出站中的 `address/server`，并通过该 VMess/VLESS 节点请求 V2rayNG 默认 `generate_204` 地址。节点配置经标准输入交给 Xray-core，不生成含凭据的磁盘配置文件；最终仍只输出裸 IP。
+- 应用不收集或需要 VMess/VLESS 节点、UUID、订阅链接或代理凭据。
+- RR Python 外壳不生成候选、不探测 IP、不计算速度或排名；这些操作由固定原版 Go 程序完成。
+- 原版程序会访问 `www.baipiao.eu.org` 维护数据，并对随机候选进行真实 RTT、CF-RAY 和下载测速。
+- 未达到期望带宽时原版程序会继续换轮；用户应留意流量并可随时停止。
+- 参考数据位于当前用户缓存目录，不修改系统 hosts、路由或代理。
 
-## 本地应用与导入
+## Cloudflare DNS
 
-- Web UI 仅绑定回环地址，每个浏览器会话使用随机请求令牌保护状态修改接口。
-- 测速结果和历史默认保存在本机，不上传到项目服务器。
-- HTTPS 订阅限制为公网目标、默认 443、有限跳转和有限响应大小，并逐跳复核以降低 SSRF 与 DNS rebinding 风险。
+- 单次测试默认不写 DNS，只能由用户从当前结果页主动开启；自动测试只有在用户启动任务时明确勾选并确认后才会逐轮写入。
+- IPv4 只写 A，IPv6 只写 AAAA，并强制 DNS-only 与自动 TTL。
+- 写入采用“只读预览 → 明确确认 → 写后回读”。
+- 同名 CNAME、NS、多条同类型记录或预览后状态变化会拒绝。
+- 自动任务与手动操作都只处理本轮唯一 IP 和用户指定的一条记录，不创建多 IP 轮询记录。
+- API Token 不进入日志、状态快照或本地设置；自动任务停止或程序关闭后从进程内存清除。
+- 建议 Token 仅授予目标 Zone 的 DNS Edit 权限。
 
-## Cloudflare DNS 同步
-
-DNS 写入默认关闭，必须由用户明确开启：
-
-- 只允许将当前实时测速达标的 IPv4 写入 `A`，或 IPv6 写入 `AAAA`；强制 DNS-only（灰云）。
-- 必须提供 32 位 Zone ID 和完整 FQDN；API Token 最小权限为指定 Zone 的 **DNS: Edit**。
-- Token 只存在于本次运行内存和发往 Cloudflare API 的认证头；不得写入日志、历史、JSON/CSV 导出、异常文本或发布包。
-- 写入采用“只读检查与预览 → 用户明确确认 → 写入后回读验证”。预览后状态变化必须重新预览。
-- 同名 CNAME、多个同类型记录或任何歧义状态都会拒绝；工具不会自动删除、合并或转换 DNS 记录。
-- 定时同步失败不会删除测速结果；认证或权限错误会暂停自动 DNS 同步，并只记录脱敏原因。
-
-## 不支持的用途
-
-本项目不提供端口扫描、漏洞探测、压力测试、任意 hosts/路由修改、代理服务、凭据收集或访问控制绕过。
-
----
-
-The scan uses a cached public maintained pool and a dynamically supplied speed target, with official Cloudflare ranges as an offline fallback. A winning candidate must also pass a complete VMess/VLESS Xray outbound request to V2rayNG's default delay URL after changing only the address. Credential-bearing configuration stays in process memory and is sent to Xray-core through standard input. DNS synchronization remains optional, uses preview-before-confirmation and DNS-only A/AAAA records, and never logs or exports the token.
+安全问题请使用 GitHub Private Vulnerability Reporting，不要在公开 Issue 中粘贴 API Token、Zone ID 与域名组合。

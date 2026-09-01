@@ -1,556 +1,409 @@
 "use strict";
 
-const $ = (selector) => document.querySelector(selector);
-const form = $("#optimizerForm");
-const startButton = $("#startButton");
-const stopButton = $("#stopButton");
-const statusBadge = $("#statusBadge");
-const stageName = $("#stageName");
-const stageCounter = $("#stageCounter");
-const stageProgress = $("#stageProgress");
-const stageDetail = $("#stageDetail");
-const logOutput = $("#logOutput");
-const errorBox = $("#errorBox");
-const resultSection = $("#resultSection");
-const familyTabs = $("#familyTabs");
-const winnerCard = $("#winnerCard");
-const resultRows = $("#resultRows");
-const resultKicker = $("#resultKicker");
-const resultTitle = $("#resultTitle");
-const resultDescription = $("#resultDescription");
-const toast = $("#toast");
-const customSourcePanel = $("#customSourcePanel");
-const ipInput = $("#ipInput");
-const ipFile = $("#ipFile");
-const ipSourceStatus = $("#ipSourceStatus");
-const poolCount = $("#poolCount");
-const nodeLink = $("#nodeLink");
-const nodeStatus = $("#nodeStatus");
-const targetMbps = $("#targetMbps");
-const automationEnabled = $("#automationEnabled");
-const automationInterval = $("#automationInterval");
-const automationStatus = $("#automationStatus");
-const automationForecast = $("#automationForecast");
-const startButtonLabel = $("#startButtonLabel");
-const historyRows = $("#historyRows");
-const dnsSyncEnabled = $("#dnsSyncEnabled");
-const dnsSyncPanel = $("#dnsSyncPanel");
-const advancedSettings = $("#advancedSettings");
-const dnsRecordName = $("#dnsRecordName");
-const dnsZoneId = $("#dnsZoneId");
-const dnsApiToken = $("#dnsApiToken");
-const autoDnsSync = $("#autoDnsSync");
-const subscriptionUrl = $("#subscriptionUrl");
+const byId = (id) => document.getElementById(id);
+const homeView = byId("home-view");
+const runView = byId("run-view");
+const resultView = byId("result-view");
+const logs = byId("logs");
+const dnsDialog = byId("dns-dialog");
+const runMode = byId("run-mode");
+const automationOptions = byId("automation-options");
+const autoDnsEnabled = byId("auto-dns-enabled");
+const autoDnsFields = byId("auto-dns-fields");
 
 let requestToken = "";
-let customIps = [];
-let loadedSubscriptionUrl = "";
-let activeFamily = "";
-let pollTimer = null;
-let lastHistoryResultAt = "";
+let family = "ipv4";
+let useTls = false;
+let currentResult = null;
+let dnsPlanId = "";
+let manualHome = false;
+let lastStateKey = "";
+let automationActive = false;
 
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
+function show(view) {
+  homeView.hidden = view !== "home";
+  runView.hidden = view !== "run";
+  resultView.hidden = view !== "result";
 }
 
-function showToast(message) {
-  toast.textContent = message;
-  toast.classList.add("show");
-  window.clearTimeout(showToast.timer);
-  showToast.timer = window.setTimeout(() => toast.classList.remove("show"), 2800);
+function toast(message, bad = false) {
+  const box = byId("toast");
+  box.textContent = message;
+  box.className = bad ? "show bad" : "show";
+  window.clearTimeout(toast.timer);
+  toast.timer = window.setTimeout(() => { box.className = ""; }, 2600);
 }
 
-async function request(path, payload) {
+async function getJson(path) {
+  const response = await fetch(path, { cache: "no-store" });
+  const value = await response.json();
+  if (!response.ok) throw new Error(value.error || "HTTP " + response.status);
+  return value;
+}
+
+async function postJson(path, body = {}) {
   const response = await fetch(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-RR-Request-Token": requestToken },
-    body: JSON.stringify(payload),
+    headers: {
+      "Content-Type": "application/json",
+      "X-RR-Request-Token": requestToken,
+    },
+    body: JSON.stringify(body),
   });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok || body.ok === false) throw new Error(body.message || body.error || `请求失败（${response.status}）`);
-  return body;
-}
-
-function currentValue(name) {
-  return form.querySelector(`input[name="${name}"]:checked`)?.value || "";
-}
-
-function selectedMode() {
-  return currentValue("mode") || "reference";
-}
-
-function modeLabel(mode) {
-  return ({ reference: "快速优选", asia: "亚洲狩猎", max: "最大带宽", balanced: "均衡模式" })[mode] || "快速优选";
-}
-
-function sourceIsCustom() {
-  return currentValue("ipSource") === "custom";
-}
-
-function setCustomStatus(message, kind = "") {
-  ipSourceStatus.textContent = message;
-  ipSourceStatus.className = `source-status ${kind}`.trim();
-}
-
-function updateSourcePanel() {
-  customSourcePanel.hidden = !sourceIsCustom();
-  if (!sourceIsCustom()) {
-    customIps = [];
-    loadedSubscriptionUrl = "";
-    setCustomStatus("使用公开维护网段；自动缓存，在线更新失败时回退上次缓存或 Cloudflare 官方网段。", "ready");
+  const value = await response.json();
+  if (!response.ok || value.ok === false) {
+    throw new Error(value.error || value.message || "HTTP " + response.status);
   }
+  return value;
 }
 
-function updateDnsSync() {
-  dnsSyncPanel.hidden = !dnsSyncEnabled.checked;
-  if (!dnsSyncEnabled.checked) autoDnsSync.checked = false;
+function bindSegments(groupId, onSelect) {
+  const group = byId(groupId);
+  group.addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-value]");
+    if (!button) return;
+    group.querySelectorAll("button").forEach((item) => item.classList.toggle("selected", item === button));
+    onSelect(button.dataset.value);
+  });
 }
 
-function updatePoolHint(config) {
-  const mode = config.modes?.[selectedMode()];
-  if (!mode) return;
-  poolCount.textContent = `每轮 100 IP · 50 并发 × 3 次 · 最低延迟 10 个 · 达标即停`;
+function selectedIntervalHours() {
+  if (runMode.value === "single") return null;
+  const value = Number(runMode.value);
+  return Number.isSafeInteger(value) && value > 0 ? value : null;
 }
 
-function estimateTrafficMb(modeName, family) {
-  const mode = window.rrConfig?.modes?.[modeName];
-  if (!mode) return null;
-  const families = family === "dual" ? 2 : 1;
-  const cap = Number(window.rrConfig?.candidate_cap_per_family || 100);
-  const target = Math.max(1, Math.min(10000, Number(targetMbps.value || 100)));
-  if (modeName === "reference") return target * 125_000 * 5 * families / 1_000_000;
-  const requestFloor = modeName === "max" ? 64_000_000 : 4_000_000;
-  const requestBytes = Math.min(256_000_000, Math.max(requestFloor, Math.ceil(target * 125_000 * 1.5)));
-  const shortlist = Math.min(cap, Number(mode.micro_candidates || 10));
-  return (cap * Number(mode.pre_bytes || 16000) + shortlist * 2 * requestBytes) * families / 1_000_000;
-}
-
-function formatDataAmountMb(value) {
-  if (!Number.isFinite(value)) return "未知";
-  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} TB`;
-  if (value >= 1024) return `${(value / 1024).toFixed(1)} GB`;
-  return `${value.toFixed(1)} MB`;
-}
-
-function automationDailyUpperBoundMb(intervalMinutes, perRunMb) {
-  if (!Number.isFinite(perRunMb)) return null;
-  const minutes = Math.max(1, Number(intervalMinutes) || 1);
-  return (Math.floor(24 * 60 / minutes) + 1) * perRunMb;
-}
-
-function updateAutomationChoice() {
-  const enabled = automationEnabled.checked;
-  startButtonLabel.textContent = enabled ? "开启定时自动优选" : "开始优选 IP";
-  const min = Number(window.rrConfig?.automation?.min_interval_minutes || 5);
-  const max = Number(window.rrConfig?.automation?.max_interval_minutes || 1440);
-  automationInterval.min = String(min);
-  automationInterval.max = String(max);
-  const interval = Number.parseInt(automationInterval.value, 10) || min;
-  const perRunMb = estimateTrafficMb(selectedMode(), currentValue("family"));
-  if (enabled) {
-    automationStatus.textContent = `首次立即运行；后续每 ${interval} 分钟重测一次。`;
-    automationForecast.hidden = false;
-    automationForecast.innerHTML = `<b>首个候选即达标时的估算</b>：每次约 ${formatDataAmountMb(perRunMb)}；若候选未达标或自动换轮，实际流量会增加。`;
-  } else {
-    automationStatus.textContent = "定时自动优选未开启";
-    automationForecast.hidden = true;
-    automationForecast.textContent = "";
-  }
-  automationStatus.classList.toggle("active", enabled);
+function updateRunMode() {
+  const hours = selectedIntervalHours();
+  automationOptions.hidden = hours === null;
+  autoDnsFields.hidden = hours === null || !autoDnsEnabled.checked;
+  byId("start-button").textContent = hours === null ? "开始单次优选" : "开启自动测试";
+  byId("run-mode-hint").textContent = hours === null
+    ? "只运行一轮，完成后保留原版程序返回的 1 个 IP。"
+    : "第一轮立即运行；以后从上一轮结束后开始计时，每轮仍只保留 1 个 IP。";
+  localStorage.setItem("rr-run-mode", runMode.value);
 }
 
 function formatNextRun(value) {
-  const next = new Date(value || "");
-  return Number.isNaN(next.getTime()) ? "待安排" : next.toLocaleString();
+  if (!value) return "本轮运行中或正在安排下一轮";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "下次时间待定";
+  return "下次 " + parsed.toLocaleString();
 }
 
-function formatMbps(value) {
-  return `${Number(value || 0).toFixed(1)} Mbps`;
-}
-
-function familyRows(result, familyName) {
-  const family = result.families?.find((item) => item.family === familyName);
-  if (!family) return [];
-  return result.mode === "asia" ? (family.asia_ranked || []) : (family.ranked || []);
-}
-
-async function copyText(value, successMessage) {
-  try {
-    await navigator.clipboard.writeText(value);
-    showToast(successMessage);
-  } catch {
-    showToast("复制失败，请手动复制");
+function renderAutomation(automation, running) {
+  automationActive = automation && automation.enabled === true;
+  const hours = Number(automation && automation.interval_hours);
+  let text = "自动测试未开启";
+  let paused = false;
+  if (automationActive) {
+    const interval = hours === 24 ? "全天模式（每 24 小时）" : "每 " + hours + " 小时";
+    text = interval + " · 已启动 " + Number(automation.runs_started || 0) + " 轮 · " +
+      (running ? "本轮运行中" : formatNextRun(automation.next_run_at));
+    if (automation.dns_sync_enabled) {
+      text += automation.dns_sync_paused ? " · DNS 自动解析已暂停" : " · 每轮自动解析 1 个 IP";
+      paused = automation.dns_sync_paused === true;
+    } else {
+      text += " · DNS 由用户手动解析";
+    }
   }
-}
-
-function dnsSettings() {
-  return {
-    record_name: dnsRecordName.value.trim(),
-    zone_id: dnsZoneId.value.trim(),
-    api_token: dnsApiToken.value.trim(),
-  };
-}
-
-function validateDnsSettings() {
-  const settings = dnsSettings();
-  if (!dnsSyncEnabled.checked) throw new Error("请先在高级设置中开启 Cloudflare DNS 同步");
-  if (!settings.record_name) throw new Error("请填写完整 DNS 记录名");
-  if (!/^[0-9a-fA-F]{32}$/.test(settings.zone_id)) throw new Error("请填写 32 位 Cloudflare Zone ID");
-  if (!settings.api_token) throw new Error("请填写 Cloudflare API Token");
-  return settings;
-}
-
-function revealDnsSettings(focusTarget) {
-  advancedSettings.open = true;
-  dnsSyncEnabled.checked = true;
-  updateDnsSync();
-  const target = focusTarget || dnsRecordName;
-  target.scrollIntoView({ behavior: "smooth", block: "center" });
-  target.focus();
-}
-
-async function syncWinner(ip, family) {
-  let settings;
-  if (!dnsSyncEnabled.checked) {
-    dnsSyncEnabled.checked = true;
-    updateDnsSync();
-  }
-  try {
-    settings = validateDnsSettings();
-  } catch (error) {
-    const target = !dnsRecordName.value.trim()
-      ? dnsRecordName
-      : !/^[0-9a-fA-F]{32}$/.test(dnsZoneId.value.trim())
-        ? dnsZoneId
-        : dnsApiToken;
-    revealDnsSettings(target);
-    showToast(error.message);
-    return;
-  }
-  const type = family === "IPv6" ? "AAAA" : "A";
-  try {
-    const inspected = await request("/api/dns/inspect", { ...settings, ip, family });
-    const plan = inspected.plan || {};
-    const actionText = plan.action === "create"
-      ? `将新建 ${type} 记录：${settings.record_name} → ${ip}\n代理：DNS-only（灰云）\nTTL：自动`
-      : plan.action === "update"
-        ? `将更新 ${type} 记录：${settings.record_name}\nIP：${plan.previous_content || "（空）"} → ${ip}${plan.previous_proxied === true ? "\n代理：橙云 → DNS-only（灰云）" : "\n代理：保持 DNS-only（灰云）"}${Number(plan.previous_ttl) !== 1 ? `\nTTL：${plan.previous_ttl ?? "未知"} → 自动` : "\nTTL：保持自动"}`
-        : `该 ${type} 记录已经是 ${ip}，代理为 DNS-only（灰云），TTL 为自动，无需修改`;
-    if (!window.confirm(`Cloudflare DNS 变更预览\n\n${actionText}\n\n只操作这个指定记录，节点 SNI/Host 不受影响。确认执行？`)) return;
-    const result = await request("/api/dns/apply", {
-      ...settings, ip, family, fingerprint: plan.fingerprint, dns_write_confirmed: true,
-    });
-    showToast(result.message || `${type} 记录同步成功`);
-  } catch (error) {
-    showToast(error.message);
-  }
+  [byId("home-automation-status"), byId("result-automation-status")].forEach((item) => {
+    item.textContent = text;
+    item.classList.toggle("active", automationActive && !paused);
+    item.classList.toggle("paused", paused);
+  });
+  byId("result-automation-status").hidden = !automationActive;
+  byId("home-stop-automation").hidden = !automationActive;
+  byId("result-stop-automation").hidden = !automationActive;
+  byId("start-button").disabled = automationActive;
+  byId("update-button").disabled = automationActive;
+  runMode.disabled = automationActive;
 }
 
 function renderResult(result) {
-  const families = result.families || [];
-  if (!families.length) return;
-  resultSection.hidden = false;
-  const argoVerified = result.purpose === "argo";
-  resultKicker.textContent = argoVerified ? "CF IP RESULT · XRAY VERIFIED" : "CLOUDFLARE IP RESULT";
-  resultTitle.textContent = "首个达到目标带宽的 IP";
-  resultDescription.textContent = argoVerified
-    ? "候选已用完整节点配置通过 Xray / V2rayNG 同口径延迟测试。只替换 address / server；其他参数保持不变。"
-    : "复制 IP 后只替换节点 address / server；节点原端口、SNI、Host、传输协议与 WS Path 保持不变。";
-  if (!families.some((item) => item.family === activeFamily)) activeFamily = families[0].family;
-  familyTabs.innerHTML = "";
-  for (const family of families) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = `${family.family} · ${family.candidate_count || 0}`;
-    button.className = family.family === activeFamily ? "active" : "";
-    button.addEventListener("click", () => { activeFamily = family.family; renderResult(result); });
-    familyTabs.append(button);
-  }
-  const rows = familyRows(result, activeFamily);
-  const winner = rows[0];
-  if (!winner) {
-    winnerCard.innerHTML = "<div class=\"winner-domain\"><small>NO RESULT</small><h3>本轮没有达标结果</h3><p>任务会自动换一批继续；如果你主动停止，请降低目标带宽后重试。</p></div>";
-    resultRows.innerHTML = "";
-    return;
-  }
-  const target = Number(result.target_mbps || 100);
-  const meetsTarget = Number(winner.round_floor_mbps || 0) >= target;
-  const peakKbps = Number(winner.peak_kbps || Math.round(Number(winner.avg_complete_mbps || 0) * 128));
-  const nodeDelay = Number(winner.node_delay_ms || 0);
-  winnerCard.innerHTML = `
-    <div class="winner-domain"><small>WINNER · ${escapeHtml(activeFamily)} · 第 ${Number(winner.scan_round || 1)} 轮</small><h3>${escapeHtml(winner.ip)}</h3><p>${escapeHtml(winner.data_center || winner.loc || winner.pop || "数据中心未知")} · ${result.use_tls === false ? "非 TLS 80" : "TLS 443"}</p><div class="winner-actions"><button type="button" class="mini-button primary-copy" data-winner-ip>复制 IP</button><button type="button" class="mini-button" data-winner-dns>解析到我的域名（DNS-only）</button></div></div>
-    <div class="winner-stat"><small>实测带宽</small><strong>${formatMbps(winner.avg_complete_mbps)}</strong><em>目标 ${target} Mbps</em></div>
-    <div class="winner-stat"><small>完整一秒峰值</small><strong>${peakKbps.toFixed(0)} kB/s</strong><em>末尾不足一秒不计</em></div>
-    <div class="winner-stat"><small>V2rayNG 同口径延迟</small><strong>${nodeDelay > 0 ? `${nodeDelay.toFixed(0)} ms` : "未通过"}</strong><em>${meetsTarget ? "完整节点已连通" : "未达标"}</em></div>`;
-  resultRows.innerHTML = rows.map((row, index) => {
-    const rowMeetsTarget = Number(row.round_floor_mbps || 0) >= target;
-    const rowPeak = Number(row.peak_kbps || Math.round(Number(row.avg_complete_mbps || 0) * 128));
-    const rowLatency = Number(row.node_delay_ms || 0);
-    return `<tr><td><div class="rank-domain"><span class="rank-number">${index + 1}</span><div><strong>${escapeHtml(row.ip)}</strong><small>${escapeHtml(row.family)} · ${rowMeetsTarget ? "已达标" : "未达标"}</small><div class="row-actions"><button type="button" class="copy-button" data-copy-ip="${escapeHtml(row.ip)}">复制 IP</button></div></div></div></td>
-      <td class="speed-cell"><strong>${formatMbps(row.avg_complete_mbps)}</strong><small>目标 ${target} Mbps</small></td><td class="speed-cell"><strong>${rowPeak.toFixed(0)} kB/s</strong><small>完整 1 秒窗口</small></td>
-      <td><span class="quality-pill">${rowLatency.toFixed(0)} ms</span></td><td>第 ${Number(row.scan_round || 1)} 轮</td><td><span class="pop-pill">${escapeHtml(row.pop || "UNKNOWN")}</span><br><small>${escapeHtml(row.data_center || row.loc || "")}</small></td><td class="address-cell">${escapeHtml((row.source_tags || []).join(" / ") || "在线维护 IP 池")}</td></tr>`;
-  }).join("");
-  winnerCard.querySelector("[data-winner-ip]")?.addEventListener("click", () => copyText(winner.ip, "已复制 IP；请只替换节点 address / server"));
-  winnerCard.querySelector("[data-winner-dns]")?.addEventListener("click", () => syncWinner(winner.ip, activeFamily));
-  resultRows.querySelectorAll("[data-copy-ip]").forEach((button) => button.addEventListener("click", () => copyText(button.dataset.copyIp || "", "已复制 IP")));
+  currentResult = result;
+  byId("result-ip").textContent = result.ip;
+  byId("result-bandwidth").textContent = result.bandwidth + " Mbps";
+  byId("result-real").textContent = result.realBandwidth + " Mbps";
+  byId("result-speed").textContent = result.maxSpeed + " kB/s";
+  byId("result-latency").textContent = result.latencyMs + " ms";
+  byId("result-colo").textContent = result.dataCenter || "—";
+  byId("result-elapsed").textContent = result.elapsed + " 秒";
 }
 
-function historyWinner(entry, family) {
-  const rows = entry.mode === "asia" ? (family.asia_ranked || []) : (family.ranked || []);
-  return rows[0] || null;
-}
-
-async function loadHistory() {
+async function copyIp() {
+  if (!currentResult) return;
   try {
-    const response = await fetch("/api/history", { cache: "no-store" });
-    const entries = await response.json();
-    if (!Array.isArray(entries) || !entries.length) {
-      historyRows.innerHTML = "<p class=\"history-empty\">还没有历史记录。完成第一轮优选后会自动保存在这里。</p>";
-      return;
-    }
-    historyRows.innerHTML = entries.slice(0, 10).map((entry) => {
-      const champions = (entry.families || []).map((family) => ({ family: family.family, row: historyWinner(entry, family) })).filter((item) => item.row);
-      const date = new Date(entry.created_at || "");
-      const created = Number.isNaN(date.getTime()) ? String(entry.created_at || "") : date.toLocaleString();
-      const target = Number(entry.target_mbps || 100);
-      return `<article class="history-card"><div><small>${escapeHtml(created)}</small><strong>${escapeHtml(modeLabel(entry.mode))} · ${escapeHtml(entry.operator || "自动")} · 目标 ${target} Mbps</strong></div><div class="history-champions">${champions.map((item) => `<button type="button" data-history-ip="${escapeHtml(item.row.ip)}"><span>${escapeHtml(item.family)}</span><b>${escapeHtml(item.row.ip)}</b><small>${formatMbps(item.row.round_floor_mbps)} · ${Number(item.row.round_floor_mbps || 0) >= target ? "达标" : "未达标"}</small></button>`).join("") || "<span>本轮无有效冠军</span>"}</div></article>`;
-    }).join("");
-    historyRows.querySelectorAll("[data-history-ip]").forEach((button) => button.addEventListener("click", () => copyText(button.dataset.historyIp || "", "已复制历史冠军 IP")));
-  } catch (error) {
-    historyRows.innerHTML = `<p class="history-empty">历史读取失败：${escapeHtml(error.message)}</p>`;
+    await navigator.clipboard.writeText(currentResult.ip);
+    toast("IP 已复制");
+  } catch (_error) {
+    const input = document.createElement("textarea");
+    input.value = currentResult.ip;
+    document.body.appendChild(input);
+    input.select();
+    document.execCommand("copy");
+    input.remove();
+    toast("IP 已复制");
   }
 }
 
-function updateStatus(snapshot) {
-  const status = snapshot.status || "idle";
-  statusBadge.className = `status-badge ${status}`;
-  statusBadge.innerHTML = `<i></i><b>${escapeHtml({ idle: "待命", running: "运行中", stopping: "停止中", completed: "已完成", cancelled: "已停止", error: "出错" }[status] || status)}</b>`;
-  stageName.textContent = snapshot.stage || "等待开始";
-  const total = Number(snapshot.total || 0);
-  const current = Number(snapshot.current || 0);
-  stageCounter.textContent = total ? `${current} / ${total}` : "0 / 0";
-  stageProgress.value = total ? Math.min(100, Math.round(current * 100 / total)) : 0;
-  stageDetail.textContent = snapshot.detail || "";
-  logOutput.textContent = (snapshot.logs || []).join("\n") || "等待测速任务…";
-  logOutput.scrollTop = logOutput.scrollHeight;
-  errorBox.hidden = !snapshot.error;
-  errorBox.textContent = snapshot.error || "";
-  const running = status === "running" || status === "stopping";
-  const automation = snapshot.automation || {};
-  const automated = automation.enabled === true;
-  startButton.disabled = running || automated;
-  stopButton.disabled = !(status === "running" || automated);
-  if (automated) {
-    automationEnabled.checked = true;
-    automationInterval.value = String(automation.interval_minutes || automationInterval.value);
-    const next = automation.next_run_at ? `下次：${formatNextRun(automation.next_run_at)}` : (running ? "本轮运行中" : "正在准备下一轮");
-    automationStatus.textContent = `定时自动优选已开启 · 每 ${automation.interval_minutes} 分钟 · 已启动 ${automation.runs_started || 0} 轮 · ${next}`;
-    automationStatus.classList.add("active");
-    startButtonLabel.textContent = "定时自动优选运行中";
-  } else if (!automationEnabled.checked) {
-    automationStatus.textContent = "定时自动优选未开启";
-    automationStatus.classList.remove("active");
-    startButtonLabel.textContent = "开始优选 IP";
+function renderState(state) {
+  const automation = state.automation || {};
+  const running = state.status === "running" || state.status === "stopping";
+  const key = [
+    state.status,
+    state.stage,
+    state.error,
+    state.result ? state.result.ip : "",
+    automation.enabled,
+    automation.next_run_at,
+    automation.runs_started,
+    automation.dns_sync_paused,
+  ].join("|");
+  renderAutomation(automation, running);
+  [byId("home-automation-event"), byId("result-automation-event")].forEach((item) => {
+    item.textContent = automationActive ? (state.detail || "") : "";
+    item.hidden = !automationActive || !state.detail;
+  });
+  byId("stage").textContent = state.stage || "正在运行";
+  byId("detail").textContent = state.detail || "";
+  logs.textContent = state.logs && state.logs.length ? state.logs.join("\n") : "正在启动参考程序…";
+  logs.scrollTop = logs.scrollHeight;
+
+  if (state.status === "running" || state.status === "stopping") {
+    manualHome = false;
+    show("run");
+    byId("stop-button").disabled = state.status === "stopping";
+    byId("stop-button").textContent = state.status === "stopping" ? "正在停止…" : "停止本次任务";
+  } else if (state.status === "completed" && state.result) {
+    renderResult(state.result);
+    if (!manualHome) show("result");
+  } else if (state.status === "error") {
+    if (key !== lastStateKey) toast(state.error || "任务失败", true);
+    show("run");
+    byId("detail").textContent = state.error || "";
+    byId("stop-button").disabled = false;
+    byId("stop-button").textContent = automationActive ? "停止自动测试" : "返回首页";
+  } else if (state.status === "cancelled") {
+    if (key !== lastStateKey) toast("任务已停止");
+    show("home");
+  } else if (state.status === "completed" && !state.result) {
+    if (key !== lastStateKey) toast(state.stage || "参考数据已更新");
+    show("home");
+  } else {
+    show("home");
   }
-  if (snapshot.result) {
-    renderResult(snapshot.result);
-    if (status === "completed" && snapshot.result.created_at !== lastHistoryResultAt) {
-      lastHistoryResultAt = snapshot.result.created_at;
-      loadHistory();
-    }
-  }
+  lastStateKey = key;
 }
 
 async function poll() {
   try {
-    const response = await fetch("/api/status", { cache: "no-store" });
-    updateStatus(await response.json());
+    renderState(await getJson("/api/status"));
   } catch (error) {
-    console.warn(error);
+    toast(error.message, true);
+  } finally {
+    window.setTimeout(poll, 600);
   }
 }
 
-function ensurePolling() {
-  if (!pollTimer) pollTimer = window.setInterval(poll, 700);
-}
-
-async function applyParsed(result, sourceName, sourceSubscriptionUrl = "") {
-  customIps = result.ips || [];
-  loadedSubscriptionUrl = sourceSubscriptionUrl;
-  const warnings = (result.warnings || []).join(" · ");
-  setCustomStatus(`${sourceName}：识别 ${customIps.length} 个公网候选；外部地址须经严格 CF 身份复测${warnings ? ` · ${warnings}` : ""}`, "ready");
-  showToast(`已载入 ${customIps.length} 个 IP`);
-}
-
-$("#parseIpsButton").addEventListener("click", async () => {
-  try {
-    await applyParsed(await request("/api/ips/parse", { text: ipInput.value, filename: "paste.txt" }), "已识别粘贴内容");
-  } catch (error) {
-    setCustomStatus(error.message, "error");
-  }
-});
-
-$("#chooseIpFile").addEventListener("click", () => ipFile.click());
-ipFile.addEventListener("change", async () => {
-  const file = ipFile.files?.[0];
-  if (!file) return;
-  const maxBytes = Number(window.rrConfig?.max_source_bytes || 1048576);
-  if (file.size > maxBytes) {
-    setCustomStatus(`文件不能超过 ${Math.round(maxBytes / 1024 / 1024)} MiB`, "error");
-    ipFile.value = "";
+async function startScan() {
+  const bandwidth = Number(byId("bandwidth").value);
+  if (!Number.isSafeInteger(bandwidth) || bandwidth <= 0) {
+    toast("期望带宽必须是大于 0 的整数", true);
     return;
   }
-  try {
-    await applyParsed(await request("/api/ips/parse", { text: await file.text(), filename: file.name }), `已导入 ${file.name}`);
-  } catch (error) {
-    setCustomStatus(error.message, "error");
-  }
-  ipFile.value = "";
-});
-
-$("#fetchSubscriptionButton").addEventListener("click", async () => {
-  const url = subscriptionUrl.value.trim();
-  try {
-    const result = await request("/api/ips/fetch", { url });
-    await applyParsed(result, `已读取 ${result.final_url || "订阅"}`, result.final_url || url);
-  } catch (error) {
-    setCustomStatus(error.message, "error");
-  }
-});
-
-ipInput.addEventListener("input", () => {
-  if (!customIps.length || loadedSubscriptionUrl) return;
-  customIps = [];
-  setCustomStatus("粘贴内容已改变，请重新点击“识别输入”", "error");
-});
-subscriptionUrl.addEventListener("input", () => {
-  if (!loadedSubscriptionUrl) return;
-  loadedSubscriptionUrl = "";
-  customIps = [];
-  setCustomStatus("订阅链接已改变，请重新读取", "error");
-});
-
-form.querySelectorAll("input[name=ipSource]").forEach((input) => input.addEventListener("change", updateSourcePanel));
-form.querySelectorAll("input[name=mode]").forEach((input) => input.addEventListener("change", () => { updatePoolHint(window.rrConfig || {}); updateAutomationChoice(); }));
-form.querySelectorAll("input[name=family]").forEach((input) => input.addEventListener("change", updateAutomationChoice));
-nodeLink.addEventListener("input", () => {
-  nodeStatus.textContent = "节点内容已改变；开始时会在本机解析，并用完整配置做 Xray 出站测试。";
-});
-dnsSyncEnabled.addEventListener("change", updateDnsSync);
-automationEnabled.addEventListener("change", updateAutomationChoice);
-automationInterval.addEventListener("change", () => {
-  const min = Number(window.rrConfig?.automation?.min_interval_minutes || 5);
-  const max = Number(window.rrConfig?.automation?.max_interval_minutes || 1440);
-  const parsed = Number.parseInt(automationInterval.value, 10);
-  automationInterval.value = String(Number.isFinite(parsed) ? Math.max(min, Math.min(max, parsed)) : min);
-  localStorage.setItem("rr-edge-hunter-interval-minutes", automationInterval.value);
-  updateAutomationChoice();
-});
-
-for (const [element, key] of [[dnsRecordName, "rr-edge-hunter-dns-record"], [dnsZoneId, "rr-edge-hunter-zone-id"]]) {
-  element.addEventListener("change", () => localStorage.setItem(key, element.value.trim()));
-}
-
-$("#refreshHistoryButton").addEventListener("click", loadHistory);
-
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  if (sourceIsCustom() && !customIps.length) {
-    setCustomStatus("请先识别、导入或读取 IP 名单", "error");
-    return;
-  }
-  const parsedTarget = Number.parseInt(targetMbps.value, 10);
-  const minTarget = Number(window.rrConfig?.target_mbps?.min || 1);
-  const maxTarget = Number(window.rrConfig?.target_mbps?.max || 10000);
-  if (!Number.isFinite(parsedTarget) || parsedTarget < minTarget || parsedTarget > maxTarget) {
-    showToast(`目标带宽必须在 ${minTarget}–${maxTarget} Mbps 之间`);
-    return;
-  }
-  const rawNodeLink = nodeLink.value.trim();
-  if (!/^(vmess|vless):\/\//i.test(rawNodeLink)) {
-    showToast("请粘贴完整的 vmess:// 或 vless:// Argo 节点链接");
-    nodeLink.focus();
-    return;
-  }
-  const payload = {
-    mode: currentValue("mode"),
-    family: currentValue("family"),
-    operator: currentValue("operator"),
-    purpose: "argo",
-    node_link: rawNodeLink,
-    target_mbps: parsedTarget,
-    use_tls: currentValue("useTls") !== "false",
-    source: sourceIsCustom() ? "custom" : "dns",
-    ips: customIps,
-    subscription_url: sourceIsCustom() ? loadedSubscriptionUrl : "",
-    confirmed: true,
-  };
-  const automated = automationEnabled.checked;
-  if (automated) payload.interval_minutes = Number.parseInt(automationInterval.value, 10);
-  if (automated && autoDnsSync.checked) {
-    try {
-      payload.dns_sync = { ...validateDnsSettings(), enabled: true };
-    } catch (error) {
-      showToast(error.message);
+  const intervalHours = selectedIntervalHours();
+  let dnsSync = null;
+  let dnsWriteConfirmed = false;
+  if (intervalHours !== null && autoDnsEnabled.checked) {
+    const zoneId = byId("auto-zone-id").value.trim();
+    const recordName = byId("auto-record-name").value.trim();
+    const apiToken = byId("auto-api-token").value;
+    if (!zoneId || !recordName || !apiToken) {
+      toast("自动解析需要填写 Zone ID、完整域名和 API Token", true);
       return;
     }
+    const confirmed = window.confirm(
+      "确认开启自动解析：每轮原版程序返回 1 个 IP 后，自动创建或更新 " +
+      recordName + " 的 A/AAAA 灰云记录。是否继续？"
+    );
+    if (!confirmed) return;
+    dnsSync = { zone_id: zoneId, record_name: recordName, api_token: apiToken };
+    dnsWriteConfirmed = true;
   }
-  const perRunMb = estimateTrafficMb(payload.mode, payload.family);
-  const estimate = formatDataAmountMb(perRunMb);
-  const confirmation = automated
-    ? `将立即开始，并在每次找到达标 IP 后等待 ${payload.interval_minutes} 分钟再重测。若首个下载候选达标，约使用 ${estimate}；未达标会继续测速并自动换轮，实际流量会增加。是否开启？`
-    : `本轮会进行真实下载。若首个下载候选达标，约使用 ${estimate}；未达标会继续测试并自动换轮，直到找到达标 IP 或你点击停止。是否开始？`;
-  if (!window.confirm(confirmation)) return;
-  if (payload.dns_sync) {
-    if (!window.confirm(`定时同步二次确认：每轮优选成功后，将冠军 IPv4/IPv6 写入 ${payload.dns_sync.record_name} 的 A/AAAA 记录，并强制 DNS-only。是否授权？`)) return;
-    payload.dns_write_confirmed = true;
-  }
+  manualHome = false;
+  currentResult = null;
   try {
-    const result = await request(automated ? "/api/automation/start" : "/api/start", payload);
-    nodeLink.value = "";
-    nodeStatus.textContent = automated
-      ? "完整节点已交给本机定时任务内存；停止任务或关闭程序后会清除。"
-      : "完整节点已交给本次本机测试内存；关闭程序后会清除。";
-    showToast(result.message || (automated ? "定时自动优选已开启" : "优选已开始"));
-    ensurePolling();
-    await poll();
+    if (intervalHours === null) {
+      await postJson("/api/start", { family, use_tls: useTls, bandwidth });
+    } else {
+      await postJson("/api/automation/start", {
+        family,
+        use_tls: useTls,
+        bandwidth,
+        interval_hours: intervalHours,
+        dns_sync: dnsSync,
+        dns_write_confirmed: dnsWriteConfirmed,
+      });
+      if (dnsSync) {
+        localStorage.setItem("rr-zone-id", dnsSync.zone_id);
+        localStorage.setItem("rr-record-name", dnsSync.record_name);
+      }
+      byId("auto-api-token").value = "";
+    }
+    show("run");
   } catch (error) {
-    showToast(error.message);
+    toast(error.message, true);
   }
-});
+}
 
-stopButton.addEventListener("click", async () => {
+async function updateData() {
+  manualHome = false;
+  currentResult = null;
   try {
-    showToast((await request("/api/stop", {})).message);
-    automationEnabled.checked = false;
-    updateAutomationChoice();
+    await postJson("/api/update");
+    show("run");
   } catch (error) {
-    showToast(error.message);
+    toast(error.message, true);
   }
-});
+}
 
-(async () => {
-  try {
-    const config = await (await fetch("/api/config", { cache: "no-store" })).json();
-    window.rrConfig = config;
-    requestToken = config.request_token || "";
-    targetMbps.min = String(config.target_mbps?.min || 1);
-    targetMbps.max = String(config.target_mbps?.max || 10000);
-    targetMbps.value = String(config.target_mbps?.default || 100);
-    const savedInterval = Number.parseInt(localStorage.getItem("rr-edge-hunter-interval-minutes") || "", 10);
-    if (Number.isFinite(savedInterval)) automationInterval.value = String(savedInterval);
-    dnsRecordName.value = localStorage.getItem("rr-edge-hunter-dns-record") || "";
-    dnsZoneId.value = localStorage.getItem("rr-edge-hunter-zone-id") || "";
-    if (dnsRecordName.value || dnsZoneId.value) dnsSyncEnabled.checked = true;
-    $("#versionLabel").textContent = `Desktop ${config.version || ""}`;
-    updatePoolHint(config);
-    updateSourcePanel();
-    updateDnsSync();
-    updateAutomationChoice();
-    ensurePolling();
-    await Promise.all([poll(), loadHistory()]);
-  } catch (error) {
-    errorBox.hidden = false;
-    errorBox.textContent = `初始化失败：${error.message}`;
+async function stopTask() {
+  if (!automationActive && byId("stop-button").textContent === "返回首页") {
+    show("home");
+    return;
   }
-})();
+  try {
+    await postJson("/api/stop");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+async function stopAutomation() {
+  try {
+    const value = await postJson("/api/stop");
+    toast(value.message || "自动测试已停止");
+    manualHome = true;
+    show("home");
+  } catch (error) {
+    toast(error.message, true);
+  }
+}
+
+function openDns() {
+  if (!currentResult) return;
+  dnsPlanId = "";
+  byId("dns-ip").textContent = currentResult.ip;
+  byId("zone-id").value = localStorage.getItem("rr-zone-id") || "";
+  byId("record-name").value = localStorage.getItem("rr-record-name") || "";
+  byId("api-token").value = "";
+  byId("dns-preview").hidden = true;
+  byId("preview-button").disabled = false;
+  byId("preview-button").textContent = "生成只读预览";
+  dnsDialog.showModal();
+}
+
+function planText(plan) {
+  const target = plan.record_type + " " + plan.record_name + " → " + plan.champion_ip;
+  if (plan.action === "create") return "将创建 " + target + "（灰云，TTL 自动）。";
+  if (plan.action === "update") {
+    return "将把 " + plan.record_name + " 从 " + (plan.previous_content || "现有值") +
+      " 更新为 " + plan.champion_ip + "（灰云，TTL 自动）。";
+  }
+  return target + " 已经一致，无需修改；确认后只会再次校验。";
+}
+
+async function previewDns() {
+  const zoneId = byId("zone-id").value.trim();
+  const recordName = byId("record-name").value.trim();
+  const apiToken = byId("api-token").value;
+  if (!zoneId || !recordName || !apiToken) {
+    toast("请填写 Zone ID、完整域名和 API Token", true);
+    return;
+  }
+  const button = byId("preview-button");
+  button.disabled = true;
+  button.textContent = "正在读取记录…";
+  byId("dns-preview").hidden = true;
+  try {
+    const value = await postJson("/api/dns/inspect", {
+      zone_id: zoneId,
+      record_name: recordName,
+      api_token: apiToken,
+    });
+    dnsPlanId = value.plan.plan_id;
+    byId("preview-text").textContent = planText(value.plan);
+    byId("apply-button").textContent = value.plan.action === "unchanged" ? "确认并校验" : "确认写入 DNS";
+    byId("dns-preview").hidden = false;
+    byId("api-token").value = "";
+    localStorage.setItem("rr-zone-id", value.plan.zone_id);
+    localStorage.setItem("rr-record-name", value.plan.record_name);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "重新生成预览";
+  }
+}
+
+async function applyDns() {
+  if (!dnsPlanId) return;
+  const button = byId("apply-button");
+  button.disabled = true;
+  button.textContent = "正在同步…";
+  try {
+    const value = await postJson("/api/dns/apply", { plan_id: dnsPlanId });
+    const result = value.result;
+    toast(result.record_type + " " + result.record_name + " 已同步为 " + result.content);
+    dnsDialog.close();
+  } catch (error) {
+    dnsPlanId = "";
+    byId("dns-preview").hidden = true;
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = "确认写入 DNS";
+  }
+}
+
+async function init() {
+  try {
+    const config = await getJson("/api/config");
+    requestToken = config.request_token;
+    family = config.defaults.family;
+    useTls = config.defaults.use_tls;
+    byId("bandwidth").value = String(config.defaults.bandwidth);
+    const allowedHours = new Set((config.automation && config.automation.interval_hours || []).map(String));
+    const savedMode = localStorage.getItem("rr-run-mode") || "single";
+    runMode.value = savedMode === "single" || allowedHours.has(savedMode) ? savedMode : "single";
+    byId("auto-zone-id").value = localStorage.getItem("rr-zone-id") || "";
+    byId("auto-record-name").value = localStorage.getItem("rr-record-name") || "";
+    bindSegments("family-group", (value) => { family = value; });
+    bindSegments("tls-group", (value) => { useTls = value === "true"; });
+    runMode.addEventListener("change", updateRunMode);
+    autoDnsEnabled.addEventListener("change", updateRunMode);
+    byId("start-button").addEventListener("click", startScan);
+    byId("update-button").addEventListener("click", updateData);
+    byId("stop-button").addEventListener("click", stopTask);
+    byId("copy-button").addEventListener("click", copyIp);
+    byId("result-ip").addEventListener("click", copyIp);
+    byId("dns-button").addEventListener("click", openDns);
+    byId("home-stop-automation").addEventListener("click", stopAutomation);
+    byId("result-stop-automation").addEventListener("click", stopAutomation);
+    byId("home-button").addEventListener("click", () => { manualHome = true; show("home"); });
+    byId("preview-button").addEventListener("click", previewDns);
+    byId("apply-button").addEventListener("click", applyDns);
+    dnsDialog.addEventListener("close", () => {
+      byId("api-token").value = "";
+      dnsPlanId = "";
+      byId("dns-preview").hidden = true;
+    });
+    updateRunMode();
+    poll();
+  } catch (error) {
+    toast("界面初始化失败：" + error.message, true);
+  }
+}
+
+init();

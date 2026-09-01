@@ -6,6 +6,10 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from pathlib import PurePosixPath
+
+from tools.build_portable_release import _install_reference_engine
+from tools.build_release import _is_allowed
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +47,23 @@ class ReleaseBuildTest(unittest.TestCase):
                     self.assertTrue(all(info.date_time == ZIP_TIME for info in package.infolist()))
         finally:
             untracked_secret.unlink(missing_ok=True)
+
+    def test_source_package_allows_only_the_pinned_reference_file(self) -> None:
+        self.assertTrue(_is_allowed(PurePosixPath("third_party/better-cloudflare-ip/main.go")))
+        self.assertFalse(_is_allowed(PurePosixPath("third_party/better-cloudflare-ip/modified.go")))
+        self.assertFalse(_is_allowed(PurePosixPath("runtime/better-cloudflare-ip.exe")))
+
+    def test_portable_engine_is_installed_under_pyinstaller_resources(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = root / "bundle"
+            (bundle / "_internal").mkdir(parents=True)
+            engine = root / "better-cloudflare-ip.exe"
+            engine.write_bytes(b"reference-engine-test")
+            digest = _install_reference_engine(bundle, engine)
+            installed = bundle / "_internal" / "reference-engine" / engine.name
+            self.assertEqual(installed.read_bytes(), engine.read_bytes())
+            self.assertEqual(len(digest), 64)
 
 
 if __name__ == "__main__":

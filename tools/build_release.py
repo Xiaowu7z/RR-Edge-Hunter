@@ -21,6 +21,7 @@ ROOT_FILES = frozenset({
     "CHANGELOG.md",
     "NOTICE.md",
     "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
 })
 WEB_SUFFIXES = frozenset({".css", ".html", ".js"})
 
@@ -66,7 +67,7 @@ def _is_allowed(relative: PurePosixPath) -> bool:
     if relative.as_posix() in ROOT_FILES:
         return True
     if len(relative.parts) != 2:
-        return False
+        return relative.as_posix() == "third_party/better-cloudflare-ip/main.go"
     parent, filename = relative.parts
     if parent == "cfopt":
         return filename.endswith(".py")

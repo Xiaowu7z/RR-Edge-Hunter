@@ -409,14 +409,13 @@ class CloudflareDnsFailureTest(unittest.TestCase):
         self.assertEqual(response.status, 302)
         self.assertEqual(calls, [("/first", f"Bearer {TOKEN}")])
 
-    def test_auth_failure_requests_dns_pause_without_leaking_token(self) -> None:
+    def test_auth_failure_is_sanitized_without_leaking_token(self) -> None:
         transport = OneShotTransport(HttpResponse(403, json.dumps({"error": TOKEN}).encode()))
         client = CloudflareDnsClient(TOKEN, transport=transport)
         with self.assertRaises(CloudflareDnsError) as raised:
             client.inspect_sync(zone_id=ZONE_ID, record_name="edge.example.com", champion_ip="104.16.0.1")
         error = raised.exception
         self.assertEqual(error.code, "auth_failed")
-        self.assertTrue(error.pause_dns_automation)
         self.assertFalse(error.transient)
         self.assertNotIn(TOKEN, str(error))
         self.assertNotIn(TOKEN, json.dumps(error.to_dict()))

@@ -1,7 +1,13 @@
 # 第三方组件说明
 
-Windows 便携版内置未修改的 [XTLS/Xray-core v26.7.28](https://github.com/XTLS/Xray-core/releases/tag/v26.7.28)，用于完整 VMess/VLESS 节点的本地出站延迟测试。
+## badafans/better-cloudflare-ip
 
-Xray-core 采用 Mozilla Public License 2.0。官方许可证文本取自同一已校验发布归档，并随便携版位于 `xray/Xray-core-LICENSE.txt`；对应源代码可在 [XTLS/Xray-core v26.7.28](https://github.com/XTLS/Xray-core/tree/v26.7.28) 获取。
+桌面测速引擎使用上游 `badafans/better-cloudflare-ip` 的未修改 `main.go`：
 
-本项目没有修改 Xray-core。构建流程校验 Windows x64 归档 SHA-256：`c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1`。
+- 固定提交：`c4f4cdd4c44243c964e68881a451d8e1f3fd5210`
+- 文件 SHA-256：`83663f1e2655943ebae2d99d520a35f8c5dd58142ac58cf2169220e35deb11ab`
+- 仓库路径：`third_party/better-cloudflare-ip/main.go`
+
+构建流程校验文件哈希后直接用 Go 编译，不对测速源码打补丁。
+
+截至固定提交，上游仓库没有随源码提供许可证文件。分发者应自行确认其取得的使用与再分发授权；本说明不授予额外权利。
