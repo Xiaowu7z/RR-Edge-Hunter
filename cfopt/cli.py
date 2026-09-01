@@ -103,7 +103,7 @@ def _run_command(args: argparse.Namespace) -> int:
             target_host = profile.route.sni
             node_port = profile.route.port
             ws_path = profile.route.ws_path
-            xray = validate_xray_runtime()
+            xray = validate_xray_runtime(profile=profile)
             compatibility_fn = functools.partial(
                 verify_node_candidate,
                 profile=profile,

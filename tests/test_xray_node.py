@@ -66,6 +66,35 @@ class XrayNodeTest(unittest.TestCase):
             self.assertEqual(validate_xray_runtime(), path)
         self.assertEqual(run.call_args.args[0], [str(path), "version"])
 
+    def test_profile_is_syntax_checked_before_bandwidth_scan(self) -> None:
+        profile = parse_node_profile(LINK)
+        path = Path("C:/portable/xray/xray.exe")
+        responses = [
+            mock.Mock(returncode=0, stdout=b"Xray 26.7.28\n"),
+            mock.Mock(returncode=0, stdout=b"Configuration OK.\n"),
+        ]
+        with (
+            mock.patch("cfopt.xray_node.find_xray_executable", return_value=path),
+            mock.patch("cfopt.xray_node.subprocess.run", side_effect=responses) as run,
+        ):
+            self.assertEqual(validate_xray_runtime(profile=profile), path)
+        self.assertEqual(run.call_args_list[1].args[0], [str(path), "run", "-test", "-c", "stdin:"])
+        checked = json.loads(run.call_args_list[1].kwargs["input"].decode("utf-8"))
+        self.assertEqual(checked["outbounds"][0]["settings"]["vnext"][0]["address"], "104.16.0.1")
+
+    def test_invalid_profile_stops_before_bandwidth_scan(self) -> None:
+        profile = parse_node_profile(LINK)
+        responses = [
+            mock.Mock(returncode=0, stdout=b"Xray 26.7.28\n"),
+            mock.Mock(returncode=23, stdout=b"failed\n"),
+        ]
+        with (
+            mock.patch("cfopt.xray_node.find_xray_executable", return_value=Path("xray.exe")),
+            mock.patch("cfopt.xray_node.subprocess.run", side_effect=responses),
+        ):
+            with self.assertRaises(XrayRuntimeError):
+                validate_xray_runtime(profile=profile)
+
     def test_unstartable_runtime_is_fatal_not_an_ip_rejection(self) -> None:
         profile = parse_node_profile(LINK)
         with (

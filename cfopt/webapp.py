@@ -229,7 +229,10 @@ class RuntimeState:
         if isinstance(node_profile, NodeProfile):
             try:
                 prepared["_xray_executable"] = str(
-                    validate_xray_runtime(prepared.get("_xray_executable"))
+                    validate_xray_runtime(
+                        prepared.get("_xray_executable"),
+                        profile=node_profile,
+                    )
                 )
             except XrayNodeError as exc:
                 return False, f"无法开始：{exc}"
@@ -334,7 +337,10 @@ class RuntimeState:
         if isinstance(node_profile, NodeProfile):
             try:
                 prepared["_xray_executable"] = str(
-                    validate_xray_runtime(prepared.get("_xray_executable"))
+                    validate_xray_runtime(
+                        prepared.get("_xray_executable"),
+                        profile=node_profile,
+                    )
                 )
             except XrayNodeError as exc:
                 return False, f"无法开启定时优选：{exc}"
@@ -650,7 +656,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
             if not MIN_TARGET_MBPS <= target_mbps <= MAX_TARGET_MBPS:
                 raise IpSourceError(f"目标带宽必须在 {MIN_TARGET_MBPS}–{MAX_TARGET_MBPS} Mbps 之间")
             source = "custom" if body.get("source") == "custom" else "dns"
-            if mode not in MODES or family not in {"ipv4", "ipv6", "dual"}:
+            if mode != "reference" or family not in {"ipv4", "ipv6", "dual"}:
                 raise IpSourceError("参数无效")
             raw_use_tls = body.get("use_tls", True)
             if not isinstance(raw_use_tls, bool):
@@ -728,7 +734,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 self._json({
                     "version": VERSION,
                     "request_token": request_token,
-                    "default_purpose": PURPOSE_DIRECT,
+                    "default_purpose": PURPOSE_ARGO,
                     "default_target_host": SPEED_HOST,
                     "diagnostic_default_target_host": SPEED_HOST,
                     "default_node_port": 443,
@@ -758,6 +764,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                             "early_stop": mode.early_stop,
                         }
                         for name, mode in MODES.items()
+                        if name == "reference"
                     },
                 })
                 return

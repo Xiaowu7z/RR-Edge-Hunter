@@ -78,12 +78,12 @@ class WebApiTest(unittest.TestCase):
             body = json.load(response)
         self.assertEqual(body["version"], "0.1.0")
         self.assertEqual(body["request_token"], self.token)
-        self.assertEqual(body["default_purpose"], "direct")
+        self.assertEqual(body["default_purpose"], "argo")
         self.assertEqual(body["default_node_port"], 443)
         self.assertEqual(body["target_mbps"]["default"], 100)
         self.assertGreater(body["max_custom_ips"], 0)
-        self.assertEqual(body["modes"]["max"]["micro_candidates"], 20)
-        self.assertEqual(body["modes"]["max"]["pre_concurrency"], 50)
+        self.assertEqual(set(body["modes"]), {"reference"})
+        self.assertEqual(body["modes"]["reference"]["pre_concurrency"], 50)
 
     def test_web_traffic_bound_covers_two_samples_for_every_shortlisted_ip(self) -> None:
         expected = round(
@@ -170,7 +170,7 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 403)
 
     def test_custom_start_passes_only_normalized_user_ips(self) -> None:
-        with self._post("/api/start", {"mode": "balanced", "family": "ipv4", "operator": "中国移动", "source": "custom", "ips": ["104.16.0.1", "104.16.0.1", "2606:4700::1111"], "target_mbps": 200, "confirmed": True}) as response:
+        with self._post("/api/start", {"mode": "reference", "family": "ipv4", "operator": "中国移动", "source": "custom", "ips": ["104.16.0.1", "104.16.0.1", "2606:4700::1111"], "target_mbps": 200, "confirmed": True}) as response:
             body = json.load(response)
         self.assertTrue(body["ok"])
         self.assertEqual(self.state.submitted_config["_ips"], ["104.16.0.1", "2606:4700::1111"])
@@ -182,7 +182,7 @@ class WebApiTest(unittest.TestCase):
 
     def test_argo_start_parses_full_node_but_keeps_credentials_private(self) -> None:
         payload = {
-            "purpose": "argo", "mode": "balanced", "family": "ipv4", "operator": "自动",
+            "purpose": "argo", "mode": "reference", "family": "ipv4", "operator": "自动",
             "node_link": TEST_NODE_LINK,
             "source": "dns", "confirmed": True,
         }
@@ -195,7 +195,7 @@ class WebApiTest(unittest.TestCase):
         self.assertNotIn("12345678", repr(self.state.submitted_config))
 
     def test_argo_start_rejects_missing_malformed_or_unsupported_node(self) -> None:
-        base = {"purpose": "argo", "mode": "balanced", "family": "ipv4", "source": "dns", "confirmed": True}
+        base = {"purpose": "argo", "mode": "reference", "family": "ipv4", "source": "dns", "confirmed": True}
         for link in (
             "",
             "https://argo.example.com/path",
@@ -208,12 +208,12 @@ class WebApiTest(unittest.TestCase):
 
     def test_start_requires_explicit_traffic_confirmation(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as raised:
-            self._post("/api/start", {"mode": "balanced", "family": "ipv4", "target_host": "speed.cloudflare.com", "source": "dns"})
+            self._post("/api/start", {"mode": "reference", "family": "ipv4", "target_host": "speed.cloudflare.com", "source": "dns"})
         self.assertEqual(raised.exception.code, 400)
 
     def test_direct_start_needs_no_domain_and_ignores_host_port_path(self) -> None:
         payload = {
-            "mode": "asia", "family": "ipv4", "source": "dns", "confirmed": True,
+            "mode": "reference", "family": "ipv4", "source": "dns", "confirmed": True,
             "target_host": "https://attacker.example/path", "node_port": 1234,
             "ws_path": "/ws%zz", "target_mbps": 100,
         }
@@ -225,10 +225,17 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(self.state.submitted_config["ws_path"], "")
 
     def test_target_bandwidth_is_bounded(self) -> None:
-        base = {"mode": "balanced", "family": "ipv4", "source": "dns", "confirmed": True}
+        base = {"mode": "reference", "family": "ipv4", "source": "dns", "confirmed": True}
         for target in (0, 10001, True, "bad"):
             with self.subTest(target=target), self.assertRaises(urllib.error.HTTPError) as raised:
                 self._post("/api/start", {**base, "target_mbps": target})
+            self.assertEqual(raised.exception.code, 400)
+
+    def test_legacy_modes_are_not_accepted_by_the_public_api(self) -> None:
+        base = {"family": "ipv4", "source": "dns", "confirmed": True}
+        for mode in ("balanced", "asia", "max"):
+            with self.subTest(mode=mode), self.assertRaises(urllib.error.HTTPError) as raised:
+                self._post("/api/start", {**base, "mode": mode})
             self.assertEqual(raised.exception.code, 400)
 
     def test_dns_sync_requires_current_champion_zone_and_preview(self) -> None:
@@ -400,7 +407,7 @@ class WebApiTest(unittest.TestCase):
     def test_automation_dns_config_is_confirmed_and_kept_out_of_public_config(self) -> None:
         token = "secret-token-that-must-not-leak"
         body = {
-            "mode": "asia", "family": "ipv4", "operator": "自动", "source": "dns",
+            "mode": "reference", "family": "ipv4", "operator": "自动", "source": "dns",
             "confirmed": True, "interval_minutes": 30, "dns_write_confirmed": True,
             "dns_sync": {
                 "enabled": True, "record_name": "edge.example.com",
@@ -568,7 +575,7 @@ class WebApiTest(unittest.TestCase):
 
     def test_automation_start_receives_bounded_interval(self) -> None:
         body = {
-            "mode": "asia", "family": "dual", "operator": "自动", "target_host": "speed.cloudflare.com",
+            "mode": "reference", "family": "dual", "operator": "自动", "target_host": "speed.cloudflare.com",
             "source": "dns", "confirmed": True, "interval_minutes": 30,
         }
         with self._post("/api/automation/start", body) as response:
@@ -604,7 +611,7 @@ class WebApiTest(unittest.TestCase):
                 return True, "定时优选已开始"
 
         state = SchedulerState()
-        ok, _message = state.start_automation({"mode": "balanced", "family": "ipv4"}, 5)
+        ok, _message = state.start_automation({"mode": "reference", "family": "ipv4"}, 5)
         self.assertTrue(ok)
         self.assertTrue(state.started.wait(timeout=1))
         stopped, _message = state.stop()
@@ -618,10 +625,10 @@ class WebApiTest(unittest.TestCase):
         state = RuntimeState(
             automation_enabled=True,
             automation_generation=5,
-            automation_config={"mode": "asia", "family": "ipv4"},
+            automation_config={"mode": "reference", "family": "ipv4"},
         )
         ok, message = state.start({
-            "mode": "asia", "family": "ipv4", "_automation_generation": 4,
+            "mode": "reference", "family": "ipv4", "_automation_generation": 4,
         }, scheduled=True)
         self.assertFalse(ok)
         self.assertIn("已停止", message)

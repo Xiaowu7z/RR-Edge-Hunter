@@ -53,8 +53,12 @@ def find_xray_executable(explicit: str | os.PathLike[str] | None = None) -> Path
     raise XrayNodeError("未找到内置 Xray 核心；请重新下载完整便携版并保持 xray 文件夹不变")
 
 
-def validate_xray_runtime(explicit: str | os.PathLike[str] | None = None) -> Path:
-    """Resolve and launch Xray once before any bandwidth-consuming scan starts."""
+def validate_xray_runtime(
+    explicit: str | os.PathLike[str] | None = None,
+    *,
+    profile: NodeProfile | None = None,
+) -> Path:
+    """Launch Xray and validate the node before any bandwidth scan starts."""
 
     xray = find_xray_executable(explicit)
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -73,6 +77,24 @@ def validate_xray_runtime(explicit: str | os.PathLike[str] | None = None) -> Pat
     banner = checked.stdout.decode("utf-8", "replace")[:512]
     if checked.returncode != 0 or "xray" not in banner.lower():
         raise XrayRuntimeError("内置 Xray 核心自检失败；请重新下载完整便携版")
+    if profile is not None:
+        # Only address/server changes later, so one syntax check is sufficient
+        # to prevent a malformed profile from causing endless download rounds.
+        config = build_xray_config(profile, "104.16.0.1", 10808).encode("utf-8")
+        try:
+            checked = subprocess.run(
+                [str(xray), "run", "-test", "-c", "stdin:"],
+                input=config,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=5,
+                creationflags=flags,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise XrayRuntimeError("内置 Xray 无法校验完整节点配置；本轮未开始") from exc
+        if checked.returncode != 0:
+            raise XrayRuntimeError("完整节点配置无法由 Xray 加载；请确认分享链接在最新版 V2rayNG 中可用")
     return xray
 
 
@@ -157,7 +179,7 @@ def _wait_for_socks(process: subprocess.Popen[bytes], port: int, deadline: float
     while True:
         _remaining(deadline, cancel)
         if process.poll() is not None:
-            raise XrayNodeError("Xray 核心未能启动完整节点")
+            raise XrayRuntimeError("Xray 核心提前退出；本轮已停止以避免继续消耗流量")
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=0.1):
                 return
