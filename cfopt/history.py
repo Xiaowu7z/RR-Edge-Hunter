@@ -7,7 +7,12 @@ from pathlib import Path
 from typing import Any
 
 
-_PRIVATE_RESULT_FIELDS = frozenset({"network_fingerprint", "network_fingerprints"})
+_PRIVATE_RESULT_FIELDS = frozenset({
+    "network_fingerprint",
+    "network_fingerprints",
+    "target_host",
+    "ws_path",
+})
 
 
 def _without_private_result_fields(value: Any) -> Any:

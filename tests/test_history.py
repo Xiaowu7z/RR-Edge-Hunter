@@ -25,10 +25,14 @@ class HistoryPrivacyTest(unittest.TestCase):
                 save_history({
                     "created_at": "new",
                     "network_fingerprints": {"IPv4": "another-private-digest"},
+                    "target_host": "private-route.example",
+                    "ws_path": "/private-path",
                 })
             persisted = path.read_text(encoding="utf-8")
             self.assertNotIn("private-digest", persisted)
             self.assertNotIn("network_fingerprint", persisted)
+            self.assertNotIn("private-route.example", persisted)
+            self.assertNotIn("private-path", persisted)
 
 
 if __name__ == "__main__":

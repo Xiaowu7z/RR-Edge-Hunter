@@ -6,7 +6,7 @@ RR Edge Hunter 是独立第三方 Cloudflare 入口 IP 测量工具，与 Cloudf
 
 默认维护接口与可观察测速流程参考 [badafans/better-cloudflare-ip](https://github.com/badafans/better-cloudflare-ip)。本项目为独立实现；该上游仓库目前没有声明开源许可证，因此本项目不复制、不修改也不分发其源代码。维护接口属于第三方服务，其可用性、内容与使用条件可能变化。
 
-优选出的裸 IP 只用于替换节点的 `address/server`。节点端口、UUID、协议、SNI、Host 与 WS Path 应保持原配置；高级 Argo 复核仅用于用户主动选择的额外兼容验证。
+优选出的裸 IP 只用于替换节点的 `address/server`。节点端口、UUID、协议、SNI、Host 与 WS Path 应保持原配置。完整节点通过标准输入交给随便携包分发的固定版本官方 Xray-core，仅用于本机 V2rayNG 同口径出站门禁，不写入设置、日志、历史或导出。
 
 Cloudflare DNS 同步是用户主动开启的可选功能，只操作用户明确指定的 Zone 和完整记录名，并采用 DNS-only A/AAAA、只读预览、明确确认与回读验证。使用者负责保护 API Token、确认记录用途和评估 DNS 变更影响。
 

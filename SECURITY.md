@@ -6,11 +6,11 @@
 
 ## 测速边界
 
-- 默认模式不要求用户域名，从公开维护接口取得候选网段、动态测速地址与数据中心表；接口失败时使用本机缓存，缓存也不可用时回退 Cloudflare 官方网段。
+- 主流程要求用户粘贴一个自己已有且获授权的 VMess/VLESS WS+TLS 节点。完整配置（含 UUID 等凭据）只保留在本次程序内存，不进入设置、日志、历史、导出或错误文本。
 - 导入 IP 不必与动态测速域名当前 DNS 求交，也不要求预先属于 Cloudflare 官方 CIDR；非公网、私网、回环、链路本地、保留地址和错误协议族会被拒绝。
 - 每轮最多 100 个候选、50 并发预检、延迟前 10 个逐个最多下载 5 秒。未达标会进入下一轮，因此总轮数与总流量由用户停止操作和实际网络结果决定。
 - TLS 443 模式保留系统证书、SNI、Host 与实际 TCP 对端验证；非 TLS 80 必须由用户显式选择。探针不继承系统 HTTP 代理。
-- Argo 域名、端口和 WS Path 只在用户显式开启高级兼容复核时使用。最终输出仍是裸 IP，节点原端口、UUID、SNI、Host 与 Path 不变。
+- 达标候选必须只替换完整 Xray 出站中的 `address/server`，并通过该 VMess/VLESS 节点请求 V2rayNG 默认 `generate_204` 地址。节点配置经标准输入交给 Xray-core，不生成含凭据的磁盘配置文件；最终仍只输出裸 IP。
 
 ## 本地应用与导入
 
@@ -35,4 +35,4 @@ DNS 写入默认关闭，必须由用户明确开启：
 
 ---
 
-The default scan uses a cached public maintained pool and a dynamically supplied speed target, with official Cloudflare ranges as an offline fallback. TLS 443 preserves certificate, SNI, Host, and actual-peer verification; plain HTTP 80 requires explicit selection. Optional Argo checks and DNS writes require explicit user activation. DNS synchronization uses preview-before-confirmation, DNS-only A/AAAA records, and never logs or exports the token.
+The scan uses a cached public maintained pool and a dynamically supplied speed target, with official Cloudflare ranges as an offline fallback. A winning candidate must also pass a complete VMess/VLESS Xray outbound request to V2rayNG's default delay URL after changing only the address. Credential-bearing configuration stays in process memory and is sent to Xray-core through standard input. DNS synchronization remains optional, uses preview-before-confirmation and DNS-only A/AAAA records, and never logs or exports the token.

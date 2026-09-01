@@ -17,6 +17,10 @@ from cfopt.webapp import RuntimeState, _apply_dns_sync, _csv_bytes, _result_cham
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TEST_NODE_LINK = (
+    "vless://12345678-abcd-abcd-abcd-123456789abc@104.18.0.1:8443"
+    "?type=ws&security=tls&sni=argo.example.com&host=argo.example.com&path=%2Fvless%3Fed%3D2048"
+)
 
 
 class CapturingState(RuntimeState):
@@ -146,10 +150,10 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(self.state.submitted_config["target_mbps"], 200)
         self.assertGreater(self.state.submitted_config["traffic_upper_bound_mb"], 0)
 
-    def test_argo_start_preserves_node_parameters_without_credentials(self) -> None:
+    def test_argo_start_parses_full_node_but_keeps_credentials_private(self) -> None:
         payload = {
             "purpose": "argo", "mode": "balanced", "family": "ipv4", "operator": "自动",
-            "target_host": "argo.example.com", "node_port": 8443, "ws_path": "/vless?ed=2048",
+            "node_link": TEST_NODE_LINK,
             "source": "dns", "confirmed": True,
         }
         with self._post("/api/start", payload) as response:
@@ -157,17 +161,20 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(self.state.submitted_config["target_host"], "argo.example.com")
         self.assertEqual(self.state.submitted_config["node_port"], 8443)
         self.assertEqual(self.state.submitted_config["ws_path"], "/vless?ed=2048")
-        self.assertNotIn("uuid", self.state.submitted_config)
+        self.assertEqual(self.state.submitted_config["node_protocol"], "VLESS")
+        self.assertNotIn("12345678", repr(self.state.submitted_config))
 
-    def test_argo_start_rejects_url_ip_port_and_unsafe_ws_path(self) -> None:
+    def test_argo_start_rejects_missing_malformed_or_unsupported_node(self) -> None:
         base = {"purpose": "argo", "mode": "balanced", "family": "ipv4", "source": "dns", "confirmed": True}
-        for host in ("https://argo.example.com/path", "104.16.0.1", "argo.example.com:443"):
-            with self.subTest(host=host), self.assertRaises(urllib.error.HTTPError) as raised:
-                self._post("/api/start", {**base, "target_host": host})
+        for link in (
+            "",
+            "https://argo.example.com/path",
+            "vless://bad-uuid@example.com:443?type=ws&security=tls&host=example.com",
+            "vless://12345678-abcd-abcd-abcd-123456789abc@example.com:443?type=tcp&security=tls",
+        ):
+            with self.subTest(link=link), self.assertRaises(urllib.error.HTTPError) as raised:
+                self._post("/api/start", {**base, "node_link": link})
             self.assertEqual(raised.exception.code, 400)
-        with self.assertRaises(urllib.error.HTTPError) as raised:
-            self._post("/api/start", {**base, "target_host": "argo.example.com", "ws_path": "/ws%zz"})
-        self.assertEqual(raised.exception.code, 400)
 
     def test_start_requires_explicit_traffic_confirmation(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as raised:
@@ -591,14 +598,17 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(state.status, "idle")
         self.assertIsNone(state.worker)
 
-    def test_ui_contract_defaults_to_direct_ip_hunting_and_copy_ip(self) -> None:
+    def test_ui_contract_requires_full_node_and_keeps_copy_ip_simple(self) -> None:
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
         self.assertIn('name="family" value="ipv4" checked', html)
         self.assertIn('name="mode" value="reference" checked', html)
         self.assertIn('name="useTls" value="true" checked', html)
-        self.assertIn('id="argoValidationPanel" class="custom-source" hidden', html)
-        self.assertIn('return argoValidationEnabled.checked ? "argo" : "direct";', script)
+        self.assertIn('id="nodeLink"', html)
+        self.assertIn('V2rayNG 节点（必填）', html)
+        self.assertIn('purpose: "argo"', script)
+        self.assertIn('node_link: rawNodeLink', script)
+        self.assertNotIn('argoValidationEnabled', script)
         self.assertIn("data-winner-ip", script)
         self.assertIn("解析到我的域名（DNS-only）", script)
         self.assertIn("revealDnsSettings(target)", script)

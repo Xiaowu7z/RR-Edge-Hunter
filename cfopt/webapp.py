@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import csv
+import functools
 import io
 import ipaddress
 import json
@@ -29,6 +30,7 @@ from .cloudflare_dns import (
 from .history import load_history, save_history
 from .ip_sources import IpSourceError, MAX_IPS, MAX_SOURCE_BYTES, fetch_ip_subscription, normalize_ip_values, parse_ip_source
 from .models import MODES, OptimizerResult, SPEED_HOST
+from .node_template import NodeProfile, parse_node_profile
 from .pipeline import (
     MAX_CANDIDATES_PER_FAMILY,
     MAX_TARGET_MBPS,
@@ -45,6 +47,7 @@ from .pipeline import (
 from .hostnames import HostnameError, normalize_hostname
 from .resources import package_root
 from .version import VERSION
+from .xray_node import verify_node_candidate
 
 
 WEB_DIR = package_root() / "web"
@@ -175,7 +178,7 @@ class RuntimeState:
             "mode", "family", "operator", "target_host", "source", "source_ip_count",
             "automation_enabled", "automation_interval_minutes", "traffic_upper_bound_mb",
             "purpose", "node_port", "ws_path",
-            "target_mbps", "use_tls",
+            "target_mbps", "use_tls", "node_protocol",
         }
         return {key: value for key, value in config.items() if key in visible}
 
@@ -261,6 +264,12 @@ class RuntimeState:
                     self.log(f"定时任务已安全刷新 IP 订阅：{len(refreshed.ips)} 个地址")
                 except IpSourceError as exc:
                     self.log(f"IP 订阅刷新失败，继续使用上次已载入快照：{exc}")
+            node_profile = run_config.get("_node_profile")
+            compatibility_fn = (
+                functools.partial(verify_node_candidate, profile=node_profile)
+                if isinstance(node_profile, NodeProfile)
+                else None
+            )
             result = run_optimizer(
                 mode=str(run_config.get("mode", "reference")),
                 family=str(run_config.get("family", "ipv4")),
@@ -276,6 +285,7 @@ class RuntimeState:
                 cancel_event=self.cancel_event,
                 on_stage=self.on_stage,
                 log=self.log,
+                compatibility_fn=compatibility_fn,
             )
             with self.lock:
                 self.result = result
@@ -463,7 +473,7 @@ def _csv_bytes(result: OptimizerResult) -> bytes:
     writer.writerow([
         "family", "rank", "ip", "server", "target_mbps", "meets_target", "port", "sni", "host", "ws_path",
         "peak_kbps", "tcp_latency_ms", "scan_round", "data_center", "transport", "measurement_host", "measurement_port",
-        "round_floor_mbps", "avg_complete_mbps", "min_complete_mbps", "success_rate_pct", "variation_pct", "median_ttfb_ms", "pop", "loc", "rounds_tested", "source_tags",
+        "round_floor_mbps", "avg_complete_mbps", "min_complete_mbps", "success_rate_pct", "variation_pct", "median_ttfb_ms", "v2rayng_delay_ms", "pop", "loc", "rounds_tested", "source_tags",
     ])
     for family in result.families:
         rows = family.asia_ranked if result.mode == "asia" else family.ranked
@@ -476,7 +486,7 @@ def _csv_bytes(result: OptimizerResult) -> bytes:
                 "TLS" if item.use_tls else "plain HTTP", result.measurement_host, result.measurement_port,
                 f"{item.round_floor_mbps:.3f}", f"{item.avg_complete_mbps:.3f}",
                 f"{item.min_complete_mbps:.3f}", f"{item.success_rate_pct:.1f}", f"{item.variation_pct:.1f}",
-                f"{item.median_ttfb_ms:.1f}", item.pop, item.loc, item.rounds_tested, " | ".join(item.source_tags),
+                f"{item.median_ttfb_ms:.1f}", f"{item.node_delay_ms:.1f}", item.pop, item.loc, item.rounds_tested, " | ".join(item.source_tags),
             ])
     return output.getvalue().encode("utf-8-sig")
 
@@ -569,34 +579,36 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
             purpose = str(body.get("purpose", PURPOSE_DIRECT))
             if purpose not in {PURPOSE_DIRECT, PURPOSE_ARGO, PURPOSE_DNS}:
                 raise IpSourceError("用途参数无效")
+            node_profile: NodeProfile | None = None
             if purpose == PURPOSE_DIRECT:
                 target_host = SPEED_HOST
+            elif purpose == PURPOSE_ARGO:
+                raw_node_link = str(body.get("node_link", "")).strip()
+                if not raw_node_link:
+                    raise IpSourceError("请粘贴一个当前在 V2rayNG 可用的 VMess/VLESS Argo 节点")
+                if len(raw_node_link.encode("utf-8")) > 32 * 1024:
+                    raise IpSourceError("节点分享链接过长")
+                try:
+                    node_profile = parse_node_profile(raw_node_link)
+                except ValueError as exc:
+                    raise IpSourceError(str(exc)) from exc
+                target_host = node_profile.route.sni
             else:
-                raw_target = str(body.get("target_host", "" if purpose == PURPOSE_ARGO else SPEED_HOST)).strip()[:255]
+                raw_target = str(body.get("target_host", SPEED_HOST)).strip()[:255]
                 if any(marker in raw_target for marker in ("://", "/", "?", "#", "@")) or ":" in raw_target:
                     raise IpSourceError("请只填写域名，不要填写 IP、URL、端口或路径")
                 try:
                     target_host = normalize_hostname(raw_target)
                 except HostnameError as exc:
-                    label = "Argo 节点域名" if purpose == PURPOSE_ARGO else "测试主机"
-                    raise IpSourceError(f"{label}无效：{exc}") from exc
+                    raise IpSourceError(f"测试主机无效：{exc}") from exc
             if purpose == PURPOSE_ARGO:
-                raw_port = body.get("node_port", 443)
-                if isinstance(raw_port, bool):
-                    raise IpSourceError("节点端口无效")
-                try:
-                    node_port = int(raw_port)
-                except (TypeError, ValueError) as exc:
-                    raise IpSourceError("节点端口无效") from exc
-                if node_port not in SUPPORTED_TLS_PORTS:
-                    raise IpSourceError("节点端口仅支持 443、2053、2083、2087、2096、8443")
+                assert node_profile is not None
+                node_port = node_profile.route.port
             else:
                 node_port = 443
             if purpose == PURPOSE_ARGO:
-                try:
-                    ws_path = normalize_ws_path(body.get("ws_path", ""))
-                except ValueError as exc:
-                    raise IpSourceError(str(exc)) from exc
+                assert node_profile is not None
+                ws_path = node_profile.route.ws_path
             else:
                 ws_path = ""
             raw_target_mbps = body.get("target_mbps", 100)
@@ -634,6 +646,9 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 "use_tls": raw_use_tls,
                 "traffic_upper_bound_mb": _traffic_upper_bound_mb(mode, family, target_mbps),
             }
+            if node_profile is not None:
+                config["_node_profile"] = node_profile
+                config["node_protocol"] = node_profile.route.protocol
             if source == "custom":
                 values = body.get("ips")
                 if not isinstance(values, list):

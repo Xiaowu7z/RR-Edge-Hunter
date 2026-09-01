@@ -153,6 +153,7 @@ class IpMetric:
     data_center: str = ""
     scan_round: int = 0
     use_tls: bool = True
+    node_delay_ms: float = -1.0
 
     @property
     def mb_per_sec(self) -> float:
