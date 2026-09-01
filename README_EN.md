@@ -2,11 +2,9 @@
 
 **Cloudflare Preferred-IP Selector · Desktop**
 
-RR Edge Hunter is a local Cloudflare ingress-IP selector. The default scan requires no user hostname: it first performs three bounded TCP-connect rounds, then pins `speed.cloudflare.com` to shortlisted candidates on port `443` and retains strict certificate, SNI, Host, CF-RAY, and actual-peer validation for real download samples.
+RR Edge Hunter runs locally against the current computer and network egress. Each round generates 100 addresses from an online maintained pool, checks every address three times with 50-way concurrency, keeps the 10 lowest-latency candidates, and tests them one by one with up to five seconds of real download traffic. Only complete one-second windows contribute to peak throughput. The first IP that reaches the requested bandwidth is returned; otherwise a fresh round begins automatically.
 
-The output is a bare IPv4 or IPv6 address. Put it only in the proxy node's `address` or `server` field. Keep the node's original port, UUID, protocol, TLS SNI, HTTP Host, and WebSocket Path unchanged.
-
-> Cloudflare's published ranges indicate ownership, not an official speed ranking. Anycast results vary by carrier, location, egress, time, and network conditions.
+The output is a bare IPv4 or IPv6 address. Put it only in the VMess/VLESS node's `address` or `server` field. Keep the original port, UUID, protocol, TLS SNI, HTTP Host, and WebSocket Path unchanged.
 
 ## One-click defaults
 
@@ -14,16 +12,17 @@ The output is a bare IPv4 or IPv6 address. Put it only in the proxy node's `addr
 | --- | --- |
 | Address family | IPv4 |
 | Target bandwidth | 100 Mbps |
-| Strategy | Asia Hunt |
-| Measurement identity | `speed.cloudflare.com:443` |
-| Candidate source | Official Cloudflare pool by default; optional restricted public-IP imports |
+| Scan flow | 100 IPs → three checks → 10 lowest RTT → first target hit |
+| Transport | TLS 443 with strict certificates; optional plain HTTP 80 |
+| Speed target | Dynamically supplied, with cached/official fallback |
+| Candidate source | Public `baipiao.eu.org` maintained pool plus optional safe imports |
 | Output | Replace node `address/server` only |
 
-Asia Hunt still prioritizes success rate, round floor, minimum/average throughput, and variance. POP labels such as HKG, NRT, SIN, ICN, and TPE are tie-breakers only.
+The UI exposes one understandable flow instead of Balanced, Asia Hunt, and Maximum Bandwidth choices. A failed round is followed by another until a result is found or the user stops it, so there is no honest fixed total-traffic ceiling.
 
 ## Portable Windows build (the only release)
 
-[Download the latest Windows x64 portable ZIP](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip), extract it, open the `CF-IP-Optimizer` directory, and run `CF-IP-Optimizer.exe`. The runtime is included, so Python is not required. Keep the executable next to its `_internal` directory instead of moving the EXE by itself. An installer is no longer published.
+[Download the latest Windows x64 portable ZIP](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip), extract it, open the `CF-IP-Optimizer` directory, and run `CF-IP-Optimizer.exe`. The runtime is bundled; Python and an installer are not required. Keep the executable next to its `_internal` directory.
 
 ### Run from source
 
@@ -37,68 +36,64 @@ The UI binds to `127.0.0.1` only and does not upload measurement history.
 
 ## How it works
 
-1. Load current `speed.cloudflare.com` DNS seeds and a bounded deterministic sample of Cloudflare-published CIDRs.
-2. Optionally add any safe public-unicast address as a restricted candidate. Private, local, multicast, and reserved targets are rejected. The default one-click pool remains official-only and no third-party remote pool is preloaded.
-3. Run three TCP-connect rounds per candidate with a one-second per-connect bound and up to 50 workers. This cheap stage only forms a shortlist and can never make an address copyable.
-4. Target modes test the 10 lowest-latency candidates. Maximum Bandwidth tests 20 candidates and reserves several positions across latency bands/prefixes so throughput-rich routes are not excluded too early.
-5. Pin `speed.cloudflare.com:443` to each shortlisted address and run bounded real HTTPS downloads with strict certificate, SNI, Host, CF-RAY, and actual-peer checks. Confirmed results require two successful samples; failed confirmations are replaced by the next candidate.
-6. Expose only candidates with two successful strict download samples, then rank them by round floor, average throughput, variance, and TTFB; POP is only a near-tie preference.
+1. Fetch IPv4/IPv6 ranges, the current speed-test URL, and the POP-location table from `https://www.baipiao.eu.org/cloudflare/`; cache successful data for six hours.
+2. Sample up to 100 ranges per round. IPv4 keeps the first three octets and randomizes the last; IPv6 keeps the first three hextets and randomizes the remaining five. Safe user imports may occupy part of the round.
+3. Check every candidate three times with 50-way concurrency. Each attempt includes TCP, optional TLS, and a `Host: cloudflare.com` request; any failed attempt or missing `CF-RAY` rejects the candidate.
+4. Sort by average TCP latency and retain the best 10.
+5. Pin the dynamically supplied speed host to each candidate in latency order. TLS retains platform certificate, SNI, Host, and actual-peer validation; non-TLS uses port 80.
+6. Download for at most five seconds per candidate. Peak kB/s is calculated only from complete one-second windows; the final partial window is ignored.
+7. Return the first candidate whose peak reaches `target Mbps × 128 kB/s`. Optional Argo validation is an additional gate.
+8. Start a fresh round when none of the 10 candidates reaches the target. Copy and Cloudflare A/AAAA DNS-only synchronization are enabled only for a verified result.
 
-The default workflow measures the current client-to-Cloudflare ingress path. It does not need the VPS origin IP and does not rewrite node configuration.
+The default workflow measures the current client-to-Cloudflare ingress path. It needs neither a VPS origin IP nor an Argo hostname.
 
 ## Custom candidate pools
 
-Long paste, local TXT/CSV/TSV/JSON/Base64 files, bounded CIDR sampling, IPv4/IPv6 endpoint notation, and public HTTPS subscriptions are supported. Imports do not need to intersect the speed hostname's current DNS answers or belong to an official Cloudflare CIDR. External addresses remain restricted until they pass three TCP rounds and two `speed.cloudflare.com:443` downloads with system-certificate, SNI, Host, actual-peer, and CF-RAY validation; Argo adds its node-host compatibility gate. Private, local, multicast, reserved, wrong-family, and malformed targets are rejected; candidate count, concurrency, and traffic remain bounded.
+Long paste, local TXT/CSV/TSV/JSON/Base64 files, bounded CIDR sampling, IPv4/IPv6 endpoint notation, and public HTTPS subscriptions are supported. Imports need not intersect current speed-host DNS answers or belong to an official Cloudflare CIDR. Private, loopback, link-local, multicast, reserved, wrong-family, and malformed entries are rejected. An external public IP remains unusable until it passes the same three checks and real-download gate.
 
-No third-party relay pool is built in or fetched automatically. Explicit user imports never bypass the strict gates above.
+The default maintained endpoints are the public interfaces used by [badafans/better-cloudflare-ip](https://github.com/badafans/better-cloudflare-ip). This project independently implements publicly described and observable behavior. The upstream repository currently declares no open-source license, so its source code is neither copied nor bundled here.
 
 ## Optional advanced Argo compatibility check
 
-Normal preferred-IP scanning needs no hostname. Enable the advanced Argo check only when you want to verify a candidate against your own node. Supply the original TLS SNI/HTTP Host hostname, original TLS port, and optionally the WebSocket Path.
-
-Candidates must then pass certificate, SNI, Host, and actual-peer checks; a supplied Path must complete a valid WebSocket `101` upgrade. This is an additional gate only. The final output remains a bare IP, and all other node fields stay unchanged.
+Normal scanning needs no hostname. Enable this check only to validate the winning route against your own node hostname, TLS port, and optional WebSocket Path. The candidate must then pass certificate, SNI, Host, actual-peer, and optional WebSocket `101` checks. The output remains a bare IP and all other node fields stay unchanged.
 
 ## Optional Cloudflare DNS synchronization
 
-After a successful scan, a champion may be written to one explicitly selected Cloudflare DNS record. This feature is off by default and ordinary scanning requires no Cloudflare credentials.
+A verified result can be written to one explicitly selected Cloudflare DNS record. This feature is off by default.
 
 - IPv4 maps to `A`; IPv6 maps to `AAAA`.
-- Only the current run's stable champion with two successful strict download samples is accepted; it may come from an official range or an explicitly imported external public candidate that passed every gate.
-- The record is forced to **DNS-only** (gray cloud).
+- The record is forced to **DNS-only**.
 - A 32-character Zone ID and full record FQDN are required.
-- Only an API Token is accepted; the minimum permission is **DNS: Edit** for the selected Zone. Global API Keys are not accepted.
-- The token remains in request memory/authorization headers and is excluded from logs, history, JSON/CSV exports, and release artifacts.
-- Phase one is read-only inspection and a change preview. Phase two requires explicit confirmation; state changes after preview force a new preview.
-- Existing CNAMEs, duplicate same-type records, or ambiguous record state are rejected. The tool never deletes, merges, or converts them automatically.
-- The written type, address, and DNS-only state are read back and verified.
-
-DNS synchronization is an optional output and does not alter the Argo hostname or any node port, UUID, SNI, Host, or Path.
+- Only a target-Zone API Token with **DNS: Edit** is accepted; Global API Keys are rejected.
+- A read-only preview precedes explicit confirmation and read-back verification.
+- CNAME conflicts, duplicate same-type records, and ambiguous states are rejected without deletion or conversion.
+- Tokens never enter logs, history, or exports.
 
 ## Scheduled desktop runs
 
-The desktop UI can rerun every 5–1,440 minutes. The first run starts immediately and later runs begin only after the previous run finishes plus the chosen interval. Estimated per-run and theoretical daily traffic are shown before activation.
-
-Successful scheduled runs may optionally synchronize the champion to DNS after an additional authorization confirmation. A DNS error is sanitized and skips/pauses synchronization; it does not stop measurement, local result storage, or future selection runs.
+The desktop UI can rerun every 5–1,440 minutes. The first run starts immediately and later runs start only after the previous run finishes plus the selected interval. The UI shows a first-candidate-hit estimate, not a false hard ceiling, and warns that retries or fresh rounds consume more traffic. Successful runs may optionally synchronize DNS after separate authorization.
 
 ## CLI examples
 
 ```bash
-python rr_optimizer.py run --purpose direct --family ipv4 --mode asia --target-mbps 100
-python rr_optimizer.py run --purpose direct --family ipv4 --mode asia --ips my-ip-list.txt --csv result.csv
-python rr_optimizer.py run --purpose argo --target-host argo.example.com --node-port 8443 --ws-path /vless --family ipv4 --mode asia
+python rr_optimizer.py run --purpose direct --family ipv4 --mode reference --target-mbps 100
+python rr_optimizer.py run --purpose direct --family ipv4 --mode reference --ips my-ip-list.txt --csv result.csv
+python rr_optimizer.py run --purpose direct --family ipv4 --mode reference --target-mbps 100 --no-tls
+python rr_optimizer.py run --purpose argo --target-host argo.example.com --node-port 8443 --ws-path /vless --family ipv4 --mode reference
 ```
 
 ## Security and privacy
 
 - The local UI is loopback-only and state-changing requests require a random session token.
-- TLS certificate and actual-peer verification stay enabled; probes do not inherit a system HTTP proxy.
+- TLS mode retains platform certificate, SNI, Host, and actual-peer verification; plain HTTP 80 requires an explicit choice.
+- The maintained pool is cached, with official Cloudflare ranges as an offline fallback.
 - HTTPS subscriptions enforce public-target, size, redirect, and DNS-rebinding checks.
-- Cloudflare API tokens never enter logs, history, or exports; errors are sanitized.
+- Cloudflare API tokens never enter logs, history, or exports.
 - The project does not provide arbitrary host/route changes, port scanning, vulnerability testing, stress testing, or access-control bypass.
 
 See [SECURITY.md](SECURITY.md) and [NOTICE.md](NOTICE.md).
 
-## Development
+## Development and release
 
 ```bash
 python -m unittest discover -s tests -v
@@ -106,4 +101,4 @@ python -m py_compile rr_optimizer.py cfopt/*.py
 node --check web/app.js
 ```
 
-The application version remains **1.0.0**. No open-source license has been selected; obtain permission before redistributing or reusing the code.
+The application version remains **1.0.0**. The only published artifact is the Windows x64 portable ZIP plus its SHA-256. No open-source license has been selected for this repository; obtain permission before redistributing or reusing its code.

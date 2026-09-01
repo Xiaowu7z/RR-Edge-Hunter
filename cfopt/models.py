@@ -67,7 +67,25 @@ MAX_BANDWIDTH = ModeParams(
     early_stop=False,
 )
 
+# Public reference-compatible flow: three RTT/CF-RAY checks, ten lowest RTT
+# candidates, then one serial five-second peak-window download per candidate.
+# The historical modes remain import-compatible for older CLI/config files,
+# while the product UI now selects this single predictable mode.
+REFERENCE = ModeParams(
+    name="reference",
+    label="快速优选",
+    pre_bytes=0,
+    micro_bytes=0,
+    full_bytes=0,
+    full_rounds=1,
+    micro_candidates=10,
+    final_candidates=1,
+    pre_concurrency=50,
+    micro_concurrency=1,
+)
+
 MODES = {
+    REFERENCE.name: REFERENCE,
     BALANCED.name: BALANCED,
     ASIA_HUNT.name: ASIA_HUNT,
     MAX_BANDWIDTH.name: MAX_BANDWIDTH,
@@ -130,6 +148,11 @@ class IpMetric:
     edge_score: int = 0
     pop_drift: bool = False
     stability: str = ""
+    peak_kbps: int = 0
+    latency_ms: int = 0
+    data_center: str = ""
+    scan_round: int = 0
+    use_tls: bool = True
 
     @property
     def mb_per_sec(self) -> float:
@@ -198,6 +221,7 @@ class OptimizerResult:
     measurement_host: str = SPEED_HOST
     measurement_port: int = 443
     network_fingerprints: dict[str, str] = field(default_factory=dict)
+    use_tls: bool = True
     version: str = VERSION
 
     def to_dict(self) -> dict[str, Any]:
@@ -219,5 +243,6 @@ class OptimizerResult:
             "ws_path": self.ws_path,
             "measurement_host": self.measurement_host,
             "measurement_port": self.measurement_port,
+            "use_tls": self.use_tls,
             "families": [family.to_dict() for family in self.families],
         }

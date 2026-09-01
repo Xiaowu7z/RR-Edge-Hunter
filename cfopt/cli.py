@@ -22,13 +22,14 @@ def _parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="在命令行执行独立 CF IP 优选、Argo 高级复核或 DNS 体检")
     run.add_argument("--purpose", choices=("direct", "argo", "dns"), default="direct", help="direct=独立 CF IP 优选；argo=附加域名兼容复核；dns=当前 DNS 快速体检")
-    run.add_argument("--mode", choices=("balanced", "asia", "max"), default="asia")
+    run.add_argument("--mode", choices=("reference",), default="reference", help="固定为快速优选流程")
     run.add_argument("--family", choices=("ipv4", "ipv6", "dual"), default="ipv4")
     run.add_argument("--operator", default="自动", help="仅作为当前线路标签记录")
-    run.add_argument("--target-host", default=SPEED_HOST, help="仅 Argo 高级复核或 DNS 体检使用；direct 模式固定使用 Cloudflare 公共测速端点")
-    run.add_argument("--node-port", type=int, default=443, help="仅用于 Argo 高级兼容复核；吞吐测速始终使用公共端点 443")
+    run.add_argument("--target-host", default=SPEED_HOST, help="仅 Argo 高级复核或 DNS 体检使用；普通优选使用在线动态测速端点")
+    run.add_argument("--node-port", type=int, default=443, help="仅用于 Argo 高级兼容复核；普通吞吐测速使用 TLS 443 或 --no-tls 的 80")
     run.add_argument("--ws-path", default="", help="可选 WebSocket 路径，例如 /vless")
     run.add_argument("--target-mbps", type=int, default=100, help="达标参考带宽，默认 100 Mbps")
+    run.add_argument("--no-tls", action="store_true", help="按参考程序的非 TLS 80 端口模式测速")
     run.add_argument("--ips", type=Path, help="可选公网 IP 名单；direct/Argo 模式作为受限候选并须经严格 CF 身份复测，DNS 模式用于交集筛选")
     run.add_argument("--output", type=Path, default=Path("rr-edge-hunter-result.json"))
     run.add_argument("--csv", type=Path, help="额外导出 CSV")
@@ -41,7 +42,11 @@ def _write_csv(path: Path, result: dict[str, object]) -> None:
     target_mbps = int(result.get("target_mbps", 100))
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
-        writer.writerow(["family", "rank", "ip", "server", "target_mbps", "meets_target", "port", "sni", "host", "ws_path", "round_floor_mbps", "avg_mbps", "success_pct", "variation_pct", "pop", "loc", "rounds"])
+        writer.writerow([
+            "family", "rank", "ip", "server", "target_mbps", "meets_target", "port", "sni", "host", "ws_path",
+            "peak_kbps", "tcp_latency_ms", "scan_round", "data_center", "transport", "measurement_host", "measurement_port",
+            "round_floor_mbps", "avg_mbps", "success_pct", "variation_pct", "pop", "loc", "rounds",
+        ])
         for family in result.get("families", []):
             if not isinstance(family, dict):
                 continue
@@ -52,6 +57,9 @@ def _write_csv(path: Path, result: dict[str, object]) -> None:
                     target_mbps, "yes" if float(row.get("round_floor_mbps", 0)) >= target_mbps else "no",
                     result.get("node_port", 443) if argo else "", result.get("target_host", "") if argo else "",
                     result.get("target_host", "") if argo else "", result.get("ws_path", "") if argo else "",
+                    row.get("peak_kbps", 0), row.get("latency_ms", 0), row.get("scan_round", 0), row.get("data_center", ""),
+                    "TLS" if row.get("use_tls", result.get("use_tls", True)) else "plain HTTP",
+                    result.get("measurement_host", ""), result.get("measurement_port", ""),
                     row.get("round_floor_mbps", 0),
                     row.get("avg_complete_mbps", 0), row.get("success_rate_pct", 0), row.get("variation_pct", 0),
                     row.get("pop", ""), row.get("loc", ""), row.get("rounds_tested", 0),
@@ -81,6 +89,7 @@ def _run_command(args: argparse.Namespace) -> int:
             node_port=args.node_port,
             ws_path=args.ws_path,
             target_mbps=args.target_mbps,
+            use_tls=not args.no_tls,
             cancel_event=cancel_event,
             on_stage=stage,
             log=log,
@@ -103,7 +112,14 @@ def _run_command(args: argparse.Namespace) -> int:
         rows = family.asia_ranked if result.mode == "asia" else family.ranked
         if rows:
             champion = rows[0]
-            print(f"{family.family} 第一名：{champion.ip} · 复核底线 {champion.round_floor_mbps:.1f} Mbps · 平均 {champion.avg_complete_mbps:.1f} Mbps")
+            if result.mode == "reference":
+                print(
+                    f"{family.family} 达标 IP：{champion.ip} · "
+                    f"完整一秒峰值 {champion.peak_kbps} kB/s "
+                    f"({champion.avg_complete_mbps:.1f} Mbps) · TCP {champion.latency_ms} ms"
+                )
+            else:
+                print(f"{family.family} 第一名：{champion.ip} · 复核底线 {champion.round_floor_mbps:.1f} Mbps · 平均 {champion.avg_complete_mbps:.1f} Mbps")
     return 0
 
 

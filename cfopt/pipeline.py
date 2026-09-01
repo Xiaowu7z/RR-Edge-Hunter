@@ -973,6 +973,7 @@ def run_optimizer(
     speed_probe_fn: SpeedProbeFunction | None = None,
     candidate_seed: object | None = None,
     rtt_probe_fn: RttProbeFunction | None = None,
+    use_tls: bool = True,
 ) -> OptimizerResult:
     if mode not in MODES:
         raise ValueError(f"未知模式：{mode}")
@@ -993,8 +994,40 @@ def run_optimizer(
     stage_callback = on_stage or (lambda _name, _current, _total, _detail: None)
     logger = log or (lambda _message: None)
     supplied = load_ips(ips_path) if ips_path is not None else ips
-    current_ips = list(resolved_ips) if resolved_ips is not None else resolver(target)
     run_seed = candidate_seed if candidate_seed is not None else f"{time.time_ns()}:{threading.get_ident()}"
+    if mode == "reference" and purpose != PURPOSE_DNS:
+        from .reference_engine import run_reference_optimizer
+
+        worker_compatibility = compatibility_fn or functools.partial(
+            probe_argo_compatibility,
+            hostname=target,
+            ws_path=normalized_ws_path,
+            port=node_port,
+        )
+        result = run_reference_optimizer(
+            family=family,
+            operator=operator,
+            target_host=target,
+            custom_ips=list(supplied or ()),
+            source_kind=source_kind,
+            cancel_event=cancel,
+            on_stage=stage_callback,
+            log=logger,
+            purpose=purpose,
+            node_port=node_port,
+            ws_path=normalized_ws_path,
+            target_mbps=target_mbps,
+            use_tls=bool(use_tls),
+            compatibility_fn=worker_compatibility,
+            network_fingerprint_fn=network_fingerprint,
+            seed=run_seed,
+        )
+        result.network_fingerprints = {
+            family_name: network_fingerprint_token(value)
+            for family_name, value in result.network_fingerprints.items()
+        }
+        return result
+    current_ips = list(resolved_ips) if resolved_ips is not None else resolver(target)
     if purpose == PURPOSE_ARGO:
         candidates, rejected_count, actual_source, candidate_sources = _build_argo_candidates(
             supplied, current_ips, logger, run_seed
