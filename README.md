@@ -73,7 +73,7 @@ RR Edge Hunter 是一款在当前电脑、当前网络出口上运行的 Cloudfl
 
 Argo 复核是主流程，不再藏在高级设置。开始测试前粘贴完整 `vmess://` 或 `vless://` 分享链接；当前支持 WebSocket + TLS 节点和 Cloudflare HTTPS 端口 `443/2053/2083/2087/2096/8443`。识别后节点内容只留在当前程序内存，不写入配置、日志、历史、导出或错误文本。
 
-门禁把完整 VMess/VLESS 出站配置直接通过标准输入交给内置官方 Xray-core，不在磁盘生成含 UUID 的节点配置文件。程序只替换候选地址，再经本地 SOCKS 入站请求 `https://www.gstatic.com/generate_204`；只有收到有效 HTTP 200/204 才通过。这验证的是真实代理连接，而不是 ICMP Ping、TCP、TLS 或 WebSocket 单层握手。
+门禁把完整 VMess/VLESS 出站配置直接通过标准输入交给内置官方 Xray-core，不在磁盘生成含 UUID 的节点配置文件。程序只替换候选地址，再经本地 SOCKS 入站以 V2rayNG/libXray 相同的 `HEAD` 方法请求 `https://www.gstatic.com/generate_204`，整个门禁最多 5 秒；只有完整代理链路返回有效 HTTP 响应才通过。这验证的是真实代理连接，而不是 ICMP Ping、TCP、TLS 或 WebSocket 单层握手。
 
 ## 可选：同步到 Cloudflare DNS
 

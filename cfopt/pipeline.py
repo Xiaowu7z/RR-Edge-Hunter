@@ -16,7 +16,7 @@ from typing import Callable, Iterable
 
 from .hostnames import HostnameError, normalize_hostname
 from .ip_sources import MAX_SOURCE_BYTES, IpSourceError, decode_ip_source_bytes, normalize_ip_values, parse_ip_source
-from .models import ASIA_HUNT, BALANCED, MODES, FamilyRunResult, IpMetric, ModeParams, OptimizerResult, PopDiscovery, ProbeResult, Snapshot, SPEED_HOST
+from .models import ASIA_HUNT, BALANCED, MODES, NODE_GATE_TIMEOUT_SECONDS, FamilyRunResult, IpMetric, ModeParams, OptimizerResult, PopDiscovery, ProbeResult, Snapshot, SPEED_HOST
 from .probe import probe_argo_compatibility, probe_download, probe_speed_window, probe_tcp_rtt, probe_trace, speed_request_bytes
 from .ranges import family_of, is_cloudflare_ip, normalized_ip, prefix_of, sample_official_cloudflare_ips
 from .ranking import address_floor, median_ttfb, rank, rank_asia, rank_maximum, stability_label, success_rate, variation
@@ -669,6 +669,9 @@ def _run_fast_speed_stage(
             return False
         try:
             allowed = bool(candidate_gate(ip))
+            _cancelled(cancel_event)
+        except OptimizerCancelled:
+            raise
         except Exception:
             allowed = False
         if allowed:
@@ -1101,9 +1104,10 @@ def run_optimizer(
                     stage = f"Argo SNI/Host 兼容验证 {family_name}"
                     stage_callback(stage, len(compatibility_cache), params.micro_candidates, ip)
                     try:
-                        result = worker_compatibility(ip, 7, cancel)
+                        result = worker_compatibility(ip, NODE_GATE_TIMEOUT_SECONDS, cancel)
                     except Exception as exc:
                         result = ProbeResult(ok=False, error=f"{type(exc).__name__}: {exc}", target_ip=ip)
+                    _cancelled(cancel)
                     allowed = bool(result.ok and result.cert_verified and result.target_matches_remote)
                     compatibility_cache[ip] = allowed
                     stage_callback(stage, len(compatibility_cache), params.micro_candidates, ip)

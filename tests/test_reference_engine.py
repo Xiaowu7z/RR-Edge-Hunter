@@ -5,8 +5,10 @@ import threading
 import unittest
 from unittest.mock import patch
 
+from cfopt.models import NODE_GATE_TIMEOUT_SECONDS, ProbeResult
 from cfopt.reference_engine import (
     MaintainedData,
+    ReferenceCancelled,
     RttResult,
     RoundCandidate,
     SpeedResult,
@@ -79,6 +81,55 @@ class ReferenceEngineTest(unittest.TestCase):
         self.assertEqual(result.ranked[0].peak_kbps, 12_800)
         self.assertEqual(result.ranked[0].data_center, "Hong Kong")
         self.assertEqual(result.ranked[0].rounds_tested, 1)
+
+    def test_node_gate_uses_five_seconds_and_cancelled_response_is_not_published(self) -> None:
+        data = MaintainedData(
+            ("104.16.0.0/24",),
+            ("2606:4700::/48",),
+            "speed.cloudflare.com",
+            "/__down?bytes=100000000",
+            {},
+            "test",
+        )
+        candidate = RoundCandidate("104.16.0.1", "维护 IP 池")
+        cancel = threading.Event()
+        observed_timeouts: list[int] = []
+
+        def gate(ip: str, timeout: int, event: threading.Event) -> ProbeResult:
+            observed_timeouts.append(timeout)
+            event.set()
+            return ProbeResult(
+                ok=True,
+                target_ip=ip,
+                actual_remote_address=ip,
+                target_matches_remote=True,
+                cert_verified=True,
+                ttfb_ms=88.0,
+            )
+
+        with (
+            patch("cfopt.reference_engine.build_round_candidates", return_value=[candidate]),
+            patch("cfopt.reference_engine.run_rtt_round", return_value=[RttResult(candidate, 10)]),
+            patch(
+                "cfopt.reference_engine.probe_speed",
+                return_value=SpeedResult(True, peak_kbps=12_800, bytes_downloaded=1_000_000),
+            ),
+            self.assertRaises(ReferenceCancelled),
+        ):
+            run_reference_family(
+                family="IPv4",
+                data=data,
+                custom_ips=(),
+                target_mbps=100,
+                use_tls=True,
+                cancel_event=cancel,
+                on_stage=lambda *_args: None,
+                log=lambda _message: None,
+                source_label="test",
+                compatibility_fn=gate,
+                compatibility_host="route.example.com",
+            )
+        self.assertEqual(observed_timeouts, [NODE_GATE_TIMEOUT_SECONDS])
 
 
 if __name__ == "__main__":

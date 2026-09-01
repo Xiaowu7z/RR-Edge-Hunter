@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-from .models import ProbeResult
+from .models import NODE_GATE_TIMEOUT_SECONDS, ProbeResult
 from .node_template import NodeProfile
 
 
@@ -196,7 +196,10 @@ def _http_status_through_node(port: int, deadline: float, cancel: threading.Even
         raw.settimeout(_remaining(deadline, cancel))
         wrapped = context.wrap_socket(raw, server_hostname=DELAY_TEST_HOST)
         request = (
-            f"GET {DELAY_TEST_PATH} HTTP/1.1\r\n"
+            # libXray v26.7.28/V2rayNG measures the configured delay URL with
+            # HEAD. Any syntactically valid HTTP response proves that the full
+            # outbound reached the target; transport failures remain failures.
+            f"HEAD {DELAY_TEST_PATH} HTTP/1.1\r\n"
             f"Host: {DELAY_TEST_HOST}\r\n"
             "User-Agent: RR-Edge-Hunter/1.0\r\n"
             "Connection: close\r\n\r\n"
@@ -225,7 +228,7 @@ def _http_status_through_node(port: int, deadline: float, cancel: threading.Even
 
 def verify_node_candidate(
     target_ip: str,
-    timeout_sec: int = 7,
+    timeout_sec: int = NODE_GATE_TIMEOUT_SECONDS,
     cancel_event: threading.Event | None = None,
     *,
     profile: NodeProfile,
@@ -238,7 +241,7 @@ def verify_node_candidate(
         return ProbeResult(ok=False, error="候选不是有效 IP", target_ip=str(target_ip))
     xray = find_xray_executable(xray_executable)
     process: subprocess.Popen[bytes] | None = None
-    deadline = time.monotonic() + max(5.0, min(float(timeout_sec), 15.0))
+    deadline = time.monotonic() + max(1.0, min(float(timeout_sec), float(NODE_GATE_TIMEOUT_SECONDS)))
     try:
         port = _free_loopback_port()
         config = build_xray_config(profile, normalized_ip, port).encode("utf-8")
@@ -260,8 +263,11 @@ def verify_node_candidate(
         process.stdin = None
         _wait_for_socks(process, port, deadline, cancel)
         status, delay_ms = _http_status_through_node(port, deadline, cancel)
-        if status not in {200, 204}:
+        # Match libXray's HTTP client: HTTP error statuses still demonstrate a
+        # working node route, while malformed/non-HTTP responses do not.
+        if not 100 <= status <= 599:
             raise XrayNodeError(f"generate_204 返回 HTTP {status}")
+        _remaining(deadline, cancel)
         return ProbeResult(
             ok=True,
             family="IPv6" if ":" in normalized_ip else "IPv4",
@@ -292,6 +298,7 @@ def verify_node_candidate(
 __all__ = [
     "DELAY_TEST_HOST",
     "DELAY_TEST_PATH",
+    "NODE_GATE_TIMEOUT_SECONDS",
     "NodeProfile",
     "XrayNodeError",
     "XrayRuntimeError",

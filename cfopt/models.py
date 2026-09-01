@@ -7,6 +7,7 @@ from .version import VERSION
 
 
 SPEED_HOST = "speed.cloudflare.com"
+NODE_GATE_TIMEOUT_SECONDS = 5
 
 
 @dataclass(frozen=True)
