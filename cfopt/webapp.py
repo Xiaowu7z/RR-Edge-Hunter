@@ -224,14 +224,14 @@ class RuntimeState:
                 self.detail = ""
 
     def start_update(self) -> tuple[bool, str]:
-        return self._begin(stage="正在更新参考数据", config={}, target=self._update)
+        return self._begin(stage="正在更新 IP 池", config={}, target=self._update)
 
     def _update(self, cancel_event: threading.Event) -> None:
         try:
             update_reference_data(cancel_event=cancel_event, on_line=self._log)
             with self.lock:
                 self.status = "completed"
-                self.stage = "参考数据已更新"
+                self.stage = "IP 池已更新"
                 self.detail = ""
         except ReferenceEngineCancelled:
             with self.lock:
@@ -593,7 +593,7 @@ def make_handler(
                     "version": VERSION,
                     "request_token": request_token,
                     "defaults": {"family": "ipv4", "use_tls": False, "bandwidth": 1},
-                    "engine": "better-cloudflare-ip 原版程序",
+                    "engine": "RR Edge Hunter",
                     "automation": {
                         "interval_hours": list(AUTOMATION_INTERVAL_HOURS),
                         "first_run_immediate": True,

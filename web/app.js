@@ -34,6 +34,13 @@ function toast(message, bad = false) {
   toast.timer = window.setTimeout(() => { box.className = ""; }, 2600);
 }
 
+function setButtonLabel(id, text) {
+  const button = byId(id);
+  const label = button.querySelector("span");
+  if (label) label.textContent = text;
+  else button.textContent = text;
+}
+
 async function getJson(path) {
   const response = await fetch(path, { cache: "no-store" });
   const value = await response.json();
@@ -77,10 +84,10 @@ function updateRunMode() {
   const hours = selectedIntervalHours();
   automationOptions.hidden = hours === null;
   autoDnsFields.hidden = hours === null || !autoDnsEnabled.checked;
-  byId("start-button").textContent = hours === null ? "开始单次优选" : "开启自动测试";
+  setButtonLabel("start-button", hours === null ? "开始单次优选" : "开启自动测试");
   byId("run-mode-hint").textContent = hours === null
-    ? "只运行一轮，完成后保留原版程序返回的 1 个 IP。"
-    : "第一轮立即运行；以后从上一轮结束后开始计时，每轮仍只保留 1 个 IP。";
+    ? "只运行一轮，完成后保留本轮最佳 IP。"
+    : "第一轮立即运行；以后从上一轮结束后开始计时，每轮只保留 1 个 IP。";
   localStorage.setItem("rr-run-mode", runMode.value);
 }
 
@@ -131,6 +138,52 @@ function renderResult(result) {
   byId("result-elapsed").textContent = result.elapsed + " 秒";
 }
 
+function renderProgress(state) {
+  const output = state.logs && state.logs.length ? state.logs.join("\n") : "";
+  const progress = byId("stage-progress");
+  const counter = byId("stage-counter");
+  const badge = byId("status-badge");
+  const badgeText = badge.querySelector("b");
+  let value = 5;
+  let label = "准备中";
+
+  if (/更新.*IP 池|重新下载|正在准备 IP 池/.test((state.stage || "") + output)) {
+    value = 35;
+    label = "同步中";
+  }
+  if (/IP 池已就绪|正在从\s*\d+\s*个子网/.test(output)) {
+    value = 16;
+    label = "IP 池就绪";
+  }
+  const rtt = Array.from(output.matchAll(/RTT 测试进度:\s*(\d+)\/(\d+)/g)).at(-1);
+  if (rtt) {
+    const current = Number(rtt[1]);
+    const total = Math.max(1, Number(rtt[2]));
+    value = 20 + Math.round(Math.min(1, current / total) * 48);
+    label = current + " / " + total;
+  }
+  if (/正在测试\s/.test(output)) {
+    value = 76;
+    label = "速度复测";
+  }
+  if (/峰值速度/.test(output)) {
+    value = 88;
+    label = "结果校验";
+  }
+  if (state.status === "completed") {
+    value = 100;
+    label = "100%";
+  }
+  if (state.status === "stopping") label = "停止中";
+  if (state.status === "error") label = "未完成";
+
+  progress.value = value;
+  progress.textContent = value + "%";
+  counter.textContent = label;
+  badge.className = "status-badge " + (state.status === "error" ? "error" : state.status === "completed" ? "done" : "running");
+  badgeText.textContent = state.status === "stopping" ? "停止中" : state.status === "error" ? "失败" : state.status === "completed" ? "已完成" : "优选中";
+}
+
 async function copyIp() {
   if (!currentResult) return;
   try {
@@ -167,14 +220,15 @@ function renderState(state) {
   });
   byId("stage").textContent = state.stage || "正在运行";
   byId("detail").textContent = state.detail || "";
-  logs.textContent = state.logs && state.logs.length ? state.logs.join("\n") : "正在启动参考程序…";
+  logs.textContent = state.logs && state.logs.length ? state.logs.join("\n") : "正在准备本轮任务…";
   logs.scrollTop = logs.scrollHeight;
+  renderProgress(state);
 
   if (state.status === "running" || state.status === "stopping") {
     manualHome = false;
     show("run");
     byId("stop-button").disabled = state.status === "stopping";
-    byId("stop-button").textContent = state.status === "stopping" ? "正在停止…" : "停止本次任务";
+    setButtonLabel("stop-button", state.status === "stopping" ? "正在停止…" : "停止本次任务");
   } else if (state.status === "completed" && state.result) {
     renderResult(state.result);
     if (!manualHome) show("result");
@@ -183,12 +237,12 @@ function renderState(state) {
     show("run");
     byId("detail").textContent = state.error || "";
     byId("stop-button").disabled = false;
-    byId("stop-button").textContent = automationActive ? "停止自动测试" : "返回首页";
+    setButtonLabel("stop-button", automationActive ? "停止自动测试" : "返回首页");
   } else if (state.status === "cancelled") {
     if (key !== lastStateKey) toast("任务已停止");
     show("home");
   } else if (state.status === "completed" && !state.result) {
-    if (key !== lastStateKey) toast(state.stage || "参考数据已更新");
+    if (key !== lastStateKey) toast(state.stage || "IP 池已更新");
     show("home");
   } else {
     show("home");
@@ -224,7 +278,7 @@ async function startScan() {
       return;
     }
     const confirmed = window.confirm(
-      "确认开启自动解析：每轮原版程序返回 1 个 IP 后，自动创建或更新 " +
+      "确认开启自动解析：每轮得到 1 个最佳 IP 后，自动创建或更新 " +
       recordName + " 的 A/AAAA 灰云记录。是否继续？"
     );
     if (!confirmed) return;
@@ -233,6 +287,9 @@ async function startScan() {
   }
   manualHome = false;
   currentResult = null;
+  byId("metric-family").textContent = family.toUpperCase();
+  byId("metric-port").textContent = useTls ? "TLS · 443" : "非 TLS · 80";
+  byId("metric-bandwidth").textContent = bandwidth + " Mbps";
   try {
     if (intervalHours === null) {
       await postJson("/api/start", { family, use_tls: useTls, bandwidth });
@@ -300,7 +357,7 @@ function openDns() {
   byId("api-token").value = "";
   byId("dns-preview").hidden = true;
   byId("preview-button").disabled = false;
-  byId("preview-button").textContent = "生成只读预览";
+  setButtonLabel("preview-button", "生成只读预览");
   dnsDialog.showModal();
 }
 
@@ -324,7 +381,7 @@ async function previewDns() {
   }
   const button = byId("preview-button");
   button.disabled = true;
-  button.textContent = "正在读取记录…";
+  setButtonLabel("preview-button", "正在读取记录…");
   byId("dns-preview").hidden = true;
   try {
     const value = await postJson("/api/dns/inspect", {
@@ -343,7 +400,7 @@ async function previewDns() {
     toast(error.message, true);
   } finally {
     button.disabled = false;
-    button.textContent = "重新生成预览";
+    setButtonLabel("preview-button", "重新生成预览");
   }
 }
 

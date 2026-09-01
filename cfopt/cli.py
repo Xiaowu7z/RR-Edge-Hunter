@@ -16,7 +16,7 @@ from .webapp import serve
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="RR Edge Hunter：调用 better-cloudflare-ip 原版程序优选 Cloudflare IP"
+        description="RR Edge Hunter：在本机优选 Cloudflare IP"
     )
     sub = parser.add_subparsers(dest="command")
     ui = sub.add_parser("ui", help="打开本机网页界面")
@@ -24,12 +24,12 @@ def _parser() -> argparse.ArgumentParser:
     ui.add_argument("--port", type=int, default=0)
     ui.add_argument("--no-open", action="store_true", help="不自动打开浏览器")
 
-    run = sub.add_parser("run", help="直接调用参考程序执行一次优选")
+    run = sub.add_parser("run", help="执行一次 IP 优选")
     run.add_argument("--family", choices=("ipv4", "ipv6"), default="ipv4")
     run.add_argument("--bandwidth", type=int, default=1, help="期望带宽，单位 Mbps")
-    run.add_argument("--tls", action="store_true", help="使用参考程序的 TLS 443 模式")
+    run.add_argument("--tls", action="store_true", help="使用 TLS 443 模式")
 
-    sub.add_parser("update", help="调用参考程序原版更新数据功能")
+    sub.add_parser("update", help="更新 IP 池")
     return parser
 
 

@@ -3,55 +3,95 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#060811">
   <title>RR Edge Hunter · CF 优选IP</title>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-  <main class="shell">
-    <header class="brand">
-      <div class="logo">RR</div>
-      <div>
-        <h1>CF 优选IP</h1>
-        <p>RR Edge Hunter · 参考程序原版引擎</p>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+
+  <header class="topbar">
+    <a class="brand" href="#top" aria-label="RR Edge Hunter 首页">
+      <span class="brand-mark" aria-hidden="true"><span>RR</span></span>
+      <span class="brand-copy"><strong>Edge Hunter</strong><small>RR CLOUDFLARE OPTIMIZER</small></span>
+    </a>
+    <div class="topbar-meta">
+      <span class="native-badge"><i></i><b>本机优选</b></span>
+      <span>Desktop 1.0.1</span>
+    </div>
+  </header>
+
+  <main id="top" class="page-shell">
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="eyebrow">RR CLOUDFLARE IP OPTIMIZER</p>
+        <h1><span>在这条网络上，</span><br><em>找到真正能跑满的 Cloudflare IP。</em></h1>
+        <p class="hero-lead">无需节点和订阅，直接在当前电脑、当前网络完成 IPv4 / IPv6 优选。可运行一次，也可按小时持续自动测试。</p>
+        <div class="hero-pills">
+          <span>IPv4 / IPv6</span><span>80 / 443</span><span>定时优选</span><span>自动解析</span>
+        </div>
       </div>
-    </header>
+      <div class="signal-card" aria-hidden="true">
+        <div class="signal-head"><span>LIVE IP HUNT</span><span class="signal-live">READY</span></div>
+        <div class="signal-orbit signal-orbit-one"><i></i></div>
+        <div class="signal-orbit signal-orbit-two"><i></i><i></i></div>
+        <div class="signal-core"><strong>CF</strong><small>IP</small></div>
+        <div class="signal-city city-hkg"><span>HKG</span><b>01</b></div>
+        <div class="signal-city city-nrt"><span>NRT</span><b>02</b></div>
+        <div class="signal-city city-sin"><span>SIN</span><b>03</b></div>
+        <div class="signal-foot"><span>EDGE NETWORK</span><strong>ONLINE</strong></div>
+      </div>
+    </section>
 
-    <section id="home-view">
-      <p class="notice">无需节点链接。候选 IP、三次 RTT / CF-RAY、最低延迟筛选、下载测速和达标规则，全部由 <code>better-cloudflare-ip</code> 原版程序执行。</p>
-
-      <div class="card form-card">
-        <label>IP 协议</label>
-        <div class="segments" id="family-group">
-          <button type="button" data-value="ipv4" class="selected">IPv4</button>
-          <button type="button" data-value="ipv6">IPv6</button>
+    <section id="home-view" class="workspace-grid">
+      <section class="panel control-panel">
+        <div class="panel-heading">
+          <div><p class="section-kicker">RUN CONFIGURATION</p><h2>设置本轮优选</h2></div>
+          <span class="count-chip">本机运行</span>
         </div>
 
-        <label>连接方式</label>
-        <div class="segments" id="tls-group">
-          <button type="button" data-value="true">TLS · 443</button>
-          <button type="button" data-value="false" class="selected">非 TLS · 80</button>
-        </div>
+        <fieldset>
+          <legend><span>01</span><b>IP 协议</b></legend>
+          <div class="segments" id="family-group">
+            <button type="button" data-value="ipv4" class="selected">IPv4</button>
+            <button type="button" data-value="ipv6">IPv6</button>
+          </div>
+        </fieldset>
 
-        <label for="bandwidth">期望带宽（Mbps）</label>
-        <input id="bandwidth" type="number" min="1" step="1" value="1" inputmode="numeric">
-        <p class="hint">原版程序会持续换轮，直到找到首个达到期望带宽的 IP，或手动停止。</p>
+        <fieldset>
+          <legend><span>02</span><b>连接方式</b></legend>
+          <div class="segments" id="tls-group">
+            <button type="button" data-value="false" class="selected">非 TLS · 80</button>
+            <button type="button" data-value="true">TLS · 443</button>
+          </div>
+        </fieldset>
 
-        <label for="run-mode">运行方式</label>
-        <select id="run-mode">
-          <option value="single">单次手动测试</option>
-          <option value="1">每 1 小时自动测试</option>
-          <option value="2">每 2 小时自动测试</option>
-          <option value="4">每 4 小时自动测试</option>
-          <option value="6">每 6 小时自动测试</option>
-          <option value="12">每 12 小时自动测试</option>
-          <option value="24">全天模式 · 每 24 小时自动测试</option>
-        </select>
-        <p class="hint" id="run-mode-hint">只运行一轮，完成后保留原版程序返回的 1 个 IP。</p>
+        <fieldset>
+          <legend><span>03</span><b>期望带宽</b></legend>
+          <div class="input-unit"><input id="bandwidth" type="number" min="1" step="1" value="1" inputmode="numeric"><span>Mbps</span></div>
+          <p class="field-note">目标越高，测试时间和流量越多；找到达标 IP 后自动结束本轮。</p>
+        </fieldset>
+
+        <fieldset>
+          <legend><span>04</span><b>运行方式</b></legend>
+          <select id="run-mode">
+            <option value="single">单次手动测试</option>
+            <option value="1">每 1 小时自动测试</option>
+            <option value="2">每 2 小时自动测试</option>
+            <option value="4">每 4 小时自动测试</option>
+            <option value="6">每 6 小时自动测试</option>
+            <option value="12">每 12 小时自动测试</option>
+            <option value="24">全天模式 · 每 24 小时自动测试</option>
+          </select>
+          <p class="field-note" id="run-mode-hint">只运行一轮，完成后保留本轮最佳 IP。</p>
+        </fieldset>
 
         <div class="automation-box" id="automation-options" hidden>
           <label class="check-row">
             <input id="auto-dns-enabled" type="checkbox">
-            <span><b>每轮完成后自动解析这 1 个 IP</b><small>关闭时只保留结果，可在结果页由用户手动添加解析。</small></span>
+            <span><b>每轮完成后自动解析 1 个 IP</b><small>关闭时只保留结果，之后仍可手动添加解析。</small></span>
           </label>
           <div id="auto-dns-fields" hidden>
             <label for="auto-zone-id">Zone ID</label>
@@ -59,81 +99,104 @@
             <label for="auto-record-name">完整域名</label>
             <input id="auto-record-name" autocomplete="off" placeholder="edge.example.com">
             <label for="auto-api-token">Cloudflare API Token</label>
-            <input id="auto-api-token" type="password" autocomplete="off" placeholder="仅需目标 Zone 的 DNS Edit">
-            <p class="hint">Token 只在本次电脑程序的内存中使用；停止自动任务或关闭程序后清除。</p>
+            <input id="auto-api-token" type="password" autocomplete="off" placeholder="目标 Zone 的 DNS Edit 权限">
+            <p class="field-note">Token 仅在当前程序内存中使用，停止任务或关闭程序后清除。</p>
           </div>
         </div>
-      </div>
 
-      <button class="primary wide" id="start-button" type="button">开始单次优选</button>
-      <button class="secondary wide" id="update-button" type="button">更新参考程序数据</button>
-      <button class="danger wide" id="home-stop-automation" type="button" hidden>停止自动测试</button>
-      <p class="automation-status" id="home-automation-status">自动测试未开启</p>
-      <p class="automation-event" id="home-automation-event" hidden></p>
-      <p class="footnote">每轮只保留 1 个 IP；可自动更新同一条 Cloudflare 记录，也可由用户手动添加解析。</p>
-    </section>
-
-    <section id="run-view" hidden>
-      <div class="status-head">
-        <div>
-          <p class="eyebrow">执行状态</p>
-          <h2 id="stage">正在初始化</h2>
+        <div class="action-row">
+          <button class="primary-button" id="start-button" type="button"><span>开始单次优选</span><b>→</b></button>
+          <button class="ghost-button" id="update-button" type="button">更新 IP 池</button>
+          <button class="stop-button" id="home-stop-automation" type="button" hidden>停止自动测试</button>
         </div>
-        <span class="spinner" aria-hidden="true"></span>
-      </div>
-      <p id="detail" class="detail"></p>
-      <pre id="logs" class="logs">正在启动参考程序…</pre>
-      <button class="danger wide" id="stop-button" type="button">停止本次任务</button>
+        <p class="automation-status" id="home-automation-status">自动测试未开启</p>
+        <p class="automation-event" id="home-automation-event" hidden></p>
+      </section>
+
+      <section class="panel overview-panel">
+        <div class="panel-heading">
+          <div><p class="section-kicker">AUTOMATION CENTER</p><h2>自动优选中心</h2></div>
+          <span class="status-badge idle"><i></i><b>待命</b></span>
+        </div>
+        <div class="overview-orbit" aria-hidden="true"><span>RR</span><i></i><i></i><i></i></div>
+        <div class="feature-list">
+          <article><span>01</span><div><strong>首轮立即开始</strong><small>开启自动任务后无需等待，第一个测试立刻运行。</small></div></article>
+          <article><span>02</span><div><strong>任务不会重叠</strong><small>上一轮完成后才计算下一次间隔。</small></div></article>
+          <article><span>03</span><div><strong>每轮只保留一个 IP</strong><small>可自动更新同一条 DNS 记录，也可随时手动解析。</small></div></article>
+        </div>
+        <div class="privacy-strip"><i></i><span><b>LOCAL ONLY</b><small>测速和任务状态均保留在本机</small></span></div>
+      </section>
     </section>
 
-    <section id="result-view" hidden>
-      <p class="eyebrow success">优选完成</p>
-      <h2>参考程序返回的达标 IP</h2>
-      <div class="card result-card">
-        <button class="ip-value" id="result-ip" type="button" title="复制 IP"></button>
-        <dl>
-          <div><dt>期望带宽</dt><dd id="result-bandwidth"></dd></div>
-          <div><dt>实测带宽</dt><dd id="result-real"></dd></div>
-          <div><dt>峰值速度</dt><dd id="result-speed"></dd></div>
-          <div><dt>往返延迟</dt><dd id="result-latency"></dd></div>
-          <div><dt>数据中心</dt><dd id="result-colo"></dd></div>
-          <div><dt>总计用时</dt><dd id="result-elapsed"></dd></div>
-        </dl>
+    <section id="run-view" class="panel run-panel" hidden>
+      <div class="panel-heading">
+        <div><p class="section-kicker">MEASUREMENT CONSOLE</p><h2>实时优选状态</h2></div>
+        <span id="status-badge" class="status-badge running"><i></i><b>优选中</b></span>
       </div>
-      <button class="primary wide" id="copy-button" type="button">复制 IP</button>
-      <button class="primary wide" id="dns-button" type="button">手动添加到 Cloudflare DNS</button>
-      <button class="danger wide" id="result-stop-automation" type="button" hidden>停止自动测试</button>
+      <div class="stage-card">
+        <div class="stage-copy"><span id="stage">正在初始化</span><strong id="stage-counter">准备中</strong></div>
+        <progress id="stage-progress" max="100" value="5">5%</progress>
+        <p id="detail" class="detail">正在准备本轮任务…</p>
+      </div>
+      <div class="metric-strip">
+        <div><small>IP 协议</small><strong id="metric-family">IPv4</strong></div>
+        <div><small>连接方式</small><strong id="metric-port">非 TLS · 80</strong></div>
+        <div><small>期望带宽</small><strong id="metric-bandwidth">1 Mbps</strong></div>
+      </div>
+      <div class="console-wrap">
+        <div class="console-top"><span><i></i><i></i><i></i></span><b>rr-edge-hunter.log</b></div>
+        <pre id="logs" class="logs">正在准备 IP 池…</pre>
+      </div>
+      <button class="stop-button wide" id="stop-button" type="button">停止本次任务</button>
+    </section>
+
+    <section id="result-view" class="results-section" hidden>
+      <div class="results-heading">
+        <div><p class="section-kicker">BEST IP OF THIS RUN</p><h2>本轮优选结果</h2><p>点击 IP 可直接复制；需要时可手动写入 Cloudflare DNS。</p></div>
+        <span class="status-badge done"><i></i><b>已完成</b></span>
+      </div>
+      <article class="winner-card">
+        <div class="winner-main"><span>01 · BEST IP</span><button class="ip-value" id="result-ip" type="button" title="复制 IP"></button><small>点击复制到剪贴板</small></div>
+        <div class="winner-stat"><small>实测带宽</small><strong id="result-real"></strong></div>
+        <div class="winner-stat"><small>峰值速度</small><strong id="result-speed"></strong></div>
+        <div class="winner-stat"><small>往返延迟</small><strong id="result-latency"></strong></div>
+      </article>
+      <div class="result-grid">
+        <div><small>期望带宽</small><strong id="result-bandwidth"></strong></div>
+        <div><small>数据中心</small><strong id="result-colo"></strong></div>
+        <div><small>总计用时</small><strong id="result-elapsed"></strong></div>
+      </div>
+      <div class="result-actions">
+        <button class="primary-button" id="copy-button" type="button"><span>复制 IP</span><b>→</b></button>
+        <button class="ghost-button" id="dns-button" type="button">手动添加到 Cloudflare DNS</button>
+        <button class="stop-button" id="result-stop-automation" type="button" hidden>停止自动测试</button>
+        <button class="ghost-button" id="home-button" type="button">返回首页</button>
+      </div>
       <p class="automation-status" id="result-automation-status" hidden></p>
       <p class="automation-event" id="result-automation-event" hidden></p>
-      <button class="secondary wide" id="home-button" type="button">返回首页</button>
     </section>
   </main>
 
   <dialog id="dns-dialog">
     <form method="dialog" class="dialog-card" id="dns-form">
       <div class="dialog-title">
-        <div>
-          <p class="eyebrow">用户手动操作</p>
-          <h2>添加 Cloudflare 解析</h2>
-        </div>
+        <div><p class="section-kicker">CLOUDFLARE DNS</p><h2>添加 Cloudflare 解析</h2></div>
         <button class="close" value="cancel" aria-label="关闭" type="submit">×</button>
       </div>
-      <p class="hint">将优选 IP <strong id="dns-ip"></strong> 创建或更新为 A / AAAA 灰云记录。写入前先只读预览，再次确认后才会执行。</p>
+      <p class="field-note">将优选 IP <strong id="dns-ip"></strong> 创建或更新为 A / AAAA 灰云记录。写入前会先预览。</p>
       <label for="zone-id">Zone ID</label>
       <input id="zone-id" autocomplete="off" placeholder="32 位 Zone ID">
       <label for="record-name">完整域名</label>
       <input id="record-name" autocomplete="off" placeholder="edge.example.com">
       <label for="api-token">Cloudflare API Token</label>
-      <input id="api-token" type="password" autocomplete="off" placeholder="仅需目标 Zone 的 DNS Edit">
-      <button class="primary wide" id="preview-button" type="button">生成只读预览</button>
-      <div id="dns-preview" class="preview" hidden>
-        <p id="preview-text"></p>
-        <button class="danger wide" id="apply-button" type="button">确认写入 DNS</button>
-      </div>
+      <input id="api-token" type="password" autocomplete="off" placeholder="目标 Zone 的 DNS Edit 权限">
+      <button class="primary-button wide" id="preview-button" type="button"><span>生成只读预览</span><b>→</b></button>
+      <div id="dns-preview" class="preview" hidden><p id="preview-text"></p><button class="stop-button wide" id="apply-button" type="button">确认写入 DNS</button></div>
     </form>
   </dialog>
 
+  <footer><span>RR Edge Hunter · Local only</span><span>结果保存在本机，不上传测速数据</span></footer>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script src="/app.js"></script>
+  <script src="/app.js" defer></script>
 </body>
 </html>

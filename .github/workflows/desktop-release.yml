@@ -66,7 +66,7 @@ jobs:
           set -euo pipefail
           python -m pip install --disable-pip-version-check --no-cache-dir "pyinstaller==6.11.1"
           python tools/build_portable_release.py \
-            --version 1.0.0 \
+            --version 1.0.1 \
             --target Windows-x64 \
             --engine-exe runtime/better-cloudflare-ip.exe
 
@@ -105,12 +105,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="v1.0.0"
+          TAG="v1.0.1"
           NOTES_FILE="${RUNNER_TEMP}/stable-release-notes.md"
           printf '%s\n\n%s\n\n%s\n' \
-            "CF 优选IP Windows 正式版 1.0.0" \
+            "CF 优选IP Windows 正式版 1.0.1" \
             "构建提交：\`$GITHUB_SHA\`" \
-            "仅提供免安装便携版，解压后运行 CF-IP-Optimizer.exe；测速完整调用固定的 better-cloudflare-ip 原版程序，无需节点链接。支持单次及 1/2/4/6/12/24 小时自动测试，每轮只保留并可解析 1 个 IP。" \
+            "仅提供免安装便携版，解压后运行 CF-IP-Optimizer.exe。无需节点或订阅；支持单次及 1/2/4/6/12/24 小时自动测试，每轮只保留并可解析 1 个 IP。本版修复首次测试停在菜单的问题，恢复 Edge Atlas 风格界面，并隐藏内部交互菜单。" \
             > "$NOTES_FILE"
 
           while IFS= read -r OLD_TAG; do
@@ -122,14 +122,14 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -fa "$TAG" "$GITHUB_SHA" -m "CF 优选IP Windows 1.0.0"
+          git tag -fa "$TAG" "$GITHUB_SHA" -m "CF 优选IP Windows 1.0.1"
           git push origin "refs/tags/$TAG"
           gh release create "$TAG" \
             dist/CF-IP-Optimizer-Windows-x64.zip \
             dist/CF-IP-Optimizer-Windows-x64.sha256 \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
-            --title "CF 优选IP Windows 1.0.0" \
+            --title "CF 优选IP Windows 1.0.1" \
             --notes-file "$NOTES_FILE" \
             --latest
 

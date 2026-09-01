@@ -4,19 +4,19 @@
 >
 > [下载 Windows 版](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest) · [查看 Android 版](https://github.com/Xiaowu7z/RR-Edge-Hunter-Android)
 
-电脑版使用固定版本的 `better-cloudflare-ip` 原版 Go 程序完成候选生成、三次 RTT / CF-RAY 检测、延迟排序、下载测速、速度计算、达标早停和换轮。用户不需要提供 VMess/VLESS 节点、订阅链接、UUID 或其他代理信息。
+RR Edge Hunter 会在用户当前电脑和当前网络上生成候选 Cloudflare IP，依次完成三次 RTT / CF-RAY 检测、延迟筛选和下载测速，直到找到达到期望带宽的 IP。整个过程不需要 VMess/VLESS 节点、订阅链接、UUID 或其他代理信息。
 
 ## 主要功能
 
 - 支持 IPv4、IPv6，以及非 TLS 80 / TLS 443；
 - 支持单次测试，或每 1、2、4、6、12、24 小时自动测试；
 - 开启自动任务后立即运行第一轮，上一轮结束后才开始计算下次间隔；
-- 每轮只采用原版程序返回的 1 个达标 IP；
+- 每轮只保留 1 个达标 IP；
 - 可在结果页手动解析，也可让自动任务每轮更新同一条 Cloudflare A/AAAA 灰云记录；
-- 支持停止当前测试、停止后续轮次、复制结果和更新原版数据；
+- 支持停止当前测试、停止后续轮次、复制结果和更新 IP 池；
 - 界面与任务仅在本机运行，不需要部署服务器。
 
-没有节点输入、Xray、运营商模式、自定义 IP 池或 RR 二次测速算法。
+新版界面沿用 RR Edge Atlas 的双栏卡片、动态路由图、实时状态台和冠军结果卡设计；内部命令行菜单不会再显示给用户。
 
 ## 下载与使用
 
@@ -31,16 +31,16 @@
 3. 如需每轮自动解析，启动前填写 Cloudflare 信息并明确确认；
 4. 点击开始，程序会显示每轮结果、下一轮时间和自动解析状态。
 
-默认值与参考 App 一致：
+默认值：
 
 | 项目 | 默认值 |
 | --- | --- |
 | IP 协议 | IPv4 |
 | 连接方式 | 非 TLS 80 |
 | 期望带宽 | 1 Mbps |
-| RTT 进程数 | 50（由外壳固定传给原版程序） |
+| RTT 并发数 | 50 |
 
-原版程序未达到期望带宽时会继续换轮，因此目标越高，耗时和流量越大。点击“停止本次任务”会终止当前原版进程。
+未达到期望带宽时会继续换轮，因此目标越高，耗时和流量越大。点击“停止本次任务”可随时终止当前测试。
 
 ## 定时自动测试
 
@@ -48,33 +48,23 @@
 
 - 开启后第一轮立即运行；
 - 从上一轮完整结束后才开始计算下一次间隔，不会重叠启动两个测速进程；
-- 每轮只接收原版程序返回的 1 个达标 IP；
+- 每轮只保留 1 个达标 IP；
 - 可开启“每轮自动解析”，也可关闭后在结果页手动添加解析；
 - 点击停止会同时取消当前测试与后续轮次；
 - 自动任务只在电脑版程序保持运行时生效。
 
 “全天模式”对应每 24 小时自动运行一轮。自动任务依赖电脑版程序持续运行；关闭程序后不会在后台继续，也不会注册系统服务。
 
-## 原版引擎来源
+## IP 优选流程
 
-RR 桌面外壳只负责界面、调度、结果显示和用户授权的 DNS 写入，不参与测速与排名。
+1. 准备并缓存 IPv4 / IPv6 候选池和数据中心信息；
+2. 从候选子网随机生成测试 IP；
+3. 对每个候选连续执行三次 RTT 与 CF-RAY 校验；
+4. 保留低延迟候选进入下载测速；
+5. 找到达到期望带宽的 IP 后结束本轮，否则自动换一批继续；
+6. 用户可点击“更新 IP 池”随时刷新本机缓存。
 
-仓库内的 [main.go](third_party/better-cloudflare-ip/main.go) 是以下上游文件的未修改副本：
-
-- 上游：`badafans/better-cloudflare-ip`
-- 固定提交：`c4f4cdd4c44243c964e68881a451d8e1f3fd5210`
-- `main.go` SHA-256：`83663f1e2655943ebae2d99d520a35f8c5dd58142ac58cf2169220e35deb11ab`
-
-CI 先校验源码哈希，再直接编译 Windows 程序并放入便携包。Python 不生成候选、不发送 RTT/测速请求，也不参与排名，只向原版程序的标准输入写入菜单参数并读取其标准输出。
-
-上游原版流程会从 `https://www.baipiao.eu.org/cloudflare/` 获取：
-
-- `ips-v4`
-- `ips-v6`
-- `url`
-- `locations`
-
-数据缓存在当前用户目录；界面中的“更新参考程序数据”直接调用原版菜单第 8 项。
+第三方代码与许可信息统一收录在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，不占用普通用户的操作界面。
 
 ## Cloudflare DNS
 
@@ -98,7 +88,7 @@ API Token 只需目标 Zone 的 DNS Edit 权限。
 python rr_optimizer.py ui
 ```
 
-命令行调用同一个原版程序：
+命令行：
 
 ```bash
 python rr_optimizer.py run --family ipv4 --bandwidth 20
@@ -114,4 +104,4 @@ python -m py_compile rr_optimizer.py cfopt/*.py
 node --check web/app.js
 ```
 
-构建流程会再次核对固定源码哈希。详见 [第三方说明](THIRD_PARTY_NOTICES.md) 与 [安全说明](SECURITY.md)。
+详见 [第三方说明](THIRD_PARTY_NOTICES.md) 与 [安全说明](SECURITY.md)。

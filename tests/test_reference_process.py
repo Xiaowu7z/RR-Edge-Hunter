@@ -14,12 +14,33 @@ from cfopt.reference_process import (
 
 
 FAKE_SCAN = r"""
+import io
+import os
 import pathlib
 import sys
 
-menu = sys.stdin.readline().strip()
-bandwidth = sys.stdin.readline().strip()
-tasks = sys.stdin.readline().strip()
+print("----------------------------------------")
+print("1. IPV4 优选 (TLS)")
+print("2. IPV4 优选 (非 TLS)")
+print("3. IPV6 优选 (TLS)")
+print("4. IPV6 优选 (非 TLS)")
+print("5. 单 IP 测速 (TLS)")
+print("6. 单 IP 测速 (非 TLS)")
+print("7. 清空缓存")
+print("8. 更新数据")
+print("0. 退出")
+print("请选择菜单 (默认 0): ", end="", flush=True)
+
+# Match the real Go program's nested Scanner behavior. The first reader may
+# buffer every line already available on stdin, so each answer must be sent
+# only after its matching prompt appears.
+menu_reader = io.TextIOWrapper(os.fdopen(os.dup(0), "rb", buffering=0), encoding="utf-8")
+menu = menu_reader.readline().strip()
+print("请设置期望的带宽大小 (默认最小 1，单位 Mbps): ", end="", flush=True)
+scan_reader = io.TextIOWrapper(os.fdopen(os.dup(0), "rb", buffering=0), encoding="utf-8")
+bandwidth = scan_reader.readline().strip()
+print("请设置 RTT 测试进程数 (默认 50，最大 100): ", end="", flush=True)
+tasks = scan_reader.readline().strip()
 pathlib.Path("received.txt").write_text("|".join((menu, bandwidth, tasks)), encoding="utf-8")
 ip = "2606:4700::1111" if menu in {"3", "4"} else "104.16.0.8"
 print("已加载 300 个数据中心位置信息")
@@ -51,11 +72,20 @@ FAKE_UPDATE = r"""
 import pathlib
 import sys
 
+print("----------------------------------------")
+print("8. 更新数据")
+print("0. 退出")
+print("请选择菜单 (默认 0): ", end="", flush=True)
 first = sys.stdin.readline().strip()
-second = sys.stdin.readline().strip()
-pathlib.Path("received.txt").write_text(first + "|" + second, encoding="utf-8")
 print("正在重新下载数据...")
 print("已加载 300 个数据中心位置信息")
+print("----------------------------------------")
+print("8. 更新数据")
+print("0. 退出")
+print("请选择菜单 (默认 0): ", end="", flush=True)
+second = sys.stdin.readline().strip()
+pathlib.Path("received.txt").write_text(first + "|" + second, encoding="utf-8")
+print("退出成功")
 """
 
 
@@ -96,6 +126,8 @@ class ReferenceProcessTest(unittest.TestCase):
                 self.assertEqual(result.data_center, "Hong Kong")
                 self.assertEqual(result.elapsed, 7)
                 self.assertTrue(any("RTT 测试进度" in line for line in captured))
+                self.assertFalse(any("请选择菜单" in line for line in captured))
+                self.assertFalse(any("单 IP 测速" in line for line in captured))
 
     def test_cancel_terminates_reference_process(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -127,6 +159,7 @@ class ReferenceProcessTest(unittest.TestCase):
             )
             self.assertEqual((root / "received.txt").read_text(encoding="utf-8"), "8|0")
             self.assertTrue(any("重新下载" in line for line in output))
+            self.assertFalse(any("更新数据" in line for line in output))
 
     def test_rejects_non_reference_parameters(self) -> None:
         with self.assertRaises(ValueError):

@@ -4,15 +4,16 @@
 >
 > [Download Windows version](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest) · [Android version](https://github.com/Xiaowu7z/RR-Edge-Hunter-Android)
 
-Candidate generation, three RTT/CF-RAY checks, latency ranking, download measurement, speed calculation, target stopping, and round retries are all performed by the pinned, unmodified `better-cloudflare-ip` Go program.
+RR Edge Hunter generates candidate Cloudflare IPs on the current computer and network, performs three RTT/CF-RAY checks, ranks latency, and runs download measurements until one IP reaches the requested bandwidth.
 
 ## Features
 
 - IPv4/IPv6 and non-TLS port 80/TLS port 443;
 - a single run or automatic runs every 1, 2, 4, 6, 12, or 24 hours;
-- one qualifying IP from the original engine per completed run;
+- one qualifying IP per completed run;
 - manual DNS writes from the result page, or an authorized update of the same Cloudflare DNS-only A/AAAA record after every scheduled run;
-- local UI, task state, results, stop controls, and original-data updates.
+- local UI, task state, results, stop controls, and IP-pool updates;
+- an Edge Atlas-style dashboard with a live status console and winner card, without exposing internal CLI menus.
 
 The first scheduled run starts immediately. A new interval begins only after the previous run finishes, so two scans never overlap. Scheduling works only while the desktop program remains open.
 
@@ -23,14 +24,6 @@ The first scheduled run starts immediately. A new interval begins only after the
 3. Select the scan options and either a single run or a schedule.
 4. Optionally authorize one DNS record for automatic per-run updates, then start.
 
-The vendored [main.go](third_party/better-cloudflare-ip/main.go) is byte-identical to `badafans/better-cloudflare-ip` commit `c4f4cdd4c44243c964e68881a451d8e1f3fd5210`. Its SHA-256 is:
-
-```text
-83663f1e2655943ebae2d99d520a35f8c5dd58142ac58cf2169220e35deb11ab
-```
-
-CI verifies that digest before compiling the Windows helper. Python only sends the original menu inputs and parses the original final summary.
-
 ## Defaults
 
 | Setting | Default |
@@ -40,7 +33,17 @@ CI verifies that digest before compiling the Windows helper. Python only sends t
 | Target bandwidth | 1 Mbps |
 | RTT workers | 50 |
 
-The original engine keeps retrying until a target is reached or the user stops it.
+The scan keeps retrying until a target is reached or the user stops it.
+
+## Selection flow
+
+1. Prepare and cache IPv4/IPv6 ranges and data-center metadata.
+2. Generate random candidate IPs from the pool.
+3. Run three RTT and CF-RAY checks per candidate.
+4. Send the lowest-latency candidates to download measurement.
+5. Finish when an IP reaches the target bandwidth, or automatically start another round.
+
+Third-party source and license information is kept in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) instead of the user interface.
 
 ## Scheduled desktop runs
 

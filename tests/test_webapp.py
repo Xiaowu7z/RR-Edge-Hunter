@@ -154,10 +154,15 @@ class WebApiTest(unittest.TestCase):
         page = (ROOT / "web" / "index.html").read_text(encoding="utf-8").lower()
         for removed in ("node-link", "xray", "custom-ip", "operator"):
             self.assertNotIn(removed, page)
-        self.assertIn("better-cloudflare-ip", page)
+        for internal_menu in ("单 ip 测速", "清空缓存", "请选择菜单", "better-cloudflare-ip"):
+            self.assertNotIn(internal_menu, page)
         self.assertIn("cloudflare dns", page)
         self.assertIn('value="24"', page)
-        self.assertIn("每轮完成后自动解析这 1 个 ip", page)
+        self.assertIn("每轮完成后自动解析 1 个 ip", page)
+        self.assertIn("更新 ip 池", page)
+        self.assertIn("signal-card", page)
+        self.assertIn("workspace-grid", page)
+        self.assertIn("measurement console", page)
 
 
 class RuntimeStateTest(unittest.TestCase):

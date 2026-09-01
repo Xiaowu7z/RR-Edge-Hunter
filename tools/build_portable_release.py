@@ -166,7 +166,7 @@ def _write_user_guide(bundle: Path, target: str, version: str) -> None:
         f"1. 保持本文件与 {executable} 及 _internal 文件夹在同一目录。\n"
         f"2. 双击 {executable}。\n"
         "3. 程序会自动在默认浏览器打开本机界面；测速记录只保存在本机。\n\n"
-        "此版本已内置 Python 与 better-cloudflare-ip 原版程序，无需安装。\n"
+        "此版本已内置完整运行环境与优选引擎，无需安装其他软件。\n"
         "请不要单独移动或删除 _internal 文件夹。\n"
     )
     (bundle / "使用说明.txt").write_text(guide, encoding="utf-8")

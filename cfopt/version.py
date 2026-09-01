@@ -5,7 +5,7 @@ from __future__ import annotations
 from .resources import package_root
 
 
-DEFAULT_VERSION = "0.1.0"
+DEFAULT_VERSION = "1.0.1"
 
 
 def package_version() -> str:
