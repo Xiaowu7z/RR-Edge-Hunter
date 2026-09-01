@@ -12,7 +12,7 @@ from .models import SPEED_HOST
 from .node_template import parse_node_profile
 from .pipeline import run_optimizer
 from .webapp import serve
-from .xray_node import verify_node_candidate
+from .xray_node import XrayNodeError, validate_xray_runtime, verify_node_candidate
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -44,6 +44,8 @@ def _write_csv(path: Path, result: dict[str, object]) -> None:
     argo = result.get("purpose") == "argo"
     node_output = result.get("purpose") in {"direct", "argo"}
     target_mbps = int(result.get("target_mbps", 100))
+    node_sni = result.get("node_sni") or result.get("target_host", "")
+    node_host = result.get("node_host") or node_sni
     with path.open("w", encoding="utf-8-sig", newline="") as stream:
         writer = csv.writer(stream)
         writer.writerow([
@@ -59,8 +61,8 @@ def _write_csv(path: Path, result: dict[str, object]) -> None:
                 writer.writerow([
                     family.get("family", ""), index, row.get("ip", ""), row.get("ip", "") if node_output else "",
                     target_mbps, "yes" if float(row.get("round_floor_mbps", 0)) >= target_mbps else "no",
-                    result.get("node_port", 443) if argo else "", result.get("target_host", "") if argo else "",
-                    result.get("target_host", "") if argo else "", result.get("ws_path", "") if argo else "",
+                    result.get("node_port", 443) if argo else "", node_sni if argo else "",
+                    node_host if argo else "", result.get("ws_path", "") if argo else "",
                     row.get("peak_kbps", 0), row.get("latency_ms", 0), row.get("scan_round", 0), row.get("data_center", ""),
                     "TLS" if row.get("use_tls", result.get("use_tls", True)) else "plain HTTP",
                     result.get("measurement_host", ""), result.get("measurement_port", ""),
@@ -84,6 +86,7 @@ def _run_command(args: argparse.Namespace) -> int:
 
     try:
         compatibility_fn = None
+        profile = None
         target_host = args.target_host
         node_port = args.node_port
         ws_path = args.ws_path
@@ -100,7 +103,12 @@ def _run_command(args: argparse.Namespace) -> int:
             target_host = profile.route.sni
             node_port = profile.route.port
             ws_path = profile.route.ws_path
-            compatibility_fn = functools.partial(verify_node_candidate, profile=profile)
+            xray = validate_xray_runtime()
+            compatibility_fn = functools.partial(
+                verify_node_candidate,
+                profile=profile,
+                xray_executable=xray,
+            )
         result = run_optimizer(
             mode=args.mode,
             family=args.family,
@@ -122,9 +130,12 @@ def _run_command(args: argparse.Namespace) -> int:
         cancel_event.set()
         print("\n已停止。")
         return 130
-    except ValueError as exc:
+    except (ValueError, XrayNodeError) as exc:
         print(f"\n无法开始测量：{exc}", file=sys.stderr)
         return 2
+    if profile is not None:
+        result.node_sni = profile.route.sni
+        result.node_host = profile.route.host_header
     value = result.to_dict()
     args.output.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
     if args.csv:

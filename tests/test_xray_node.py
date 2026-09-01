@@ -7,7 +7,12 @@ import unittest
 from unittest import mock
 
 from cfopt.node_template import parse_node_profile
-from cfopt.xray_node import build_xray_config, verify_node_candidate
+from cfopt.xray_node import (
+    XrayRuntimeError,
+    build_xray_config,
+    validate_xray_runtime,
+    verify_node_candidate,
+)
 
 
 LINK = (
@@ -51,6 +56,25 @@ class _FakeProcess:
 
 
 class XrayNodeTest(unittest.TestCase):
+    def test_runtime_is_executed_before_scanning(self) -> None:
+        completed = mock.Mock(returncode=0, stdout=b"Xray 26.7.28\n")
+        path = Path("C:/portable/xray/xray.exe")
+        with (
+            mock.patch("cfopt.xray_node.find_xray_executable", return_value=path),
+            mock.patch("cfopt.xray_node.subprocess.run", return_value=completed) as run,
+        ):
+            self.assertEqual(validate_xray_runtime(), path)
+        self.assertEqual(run.call_args.args[0], [str(path), "version"])
+
+    def test_unstartable_runtime_is_fatal_not_an_ip_rejection(self) -> None:
+        profile = parse_node_profile(LINK)
+        with (
+            mock.patch("cfopt.xray_node.find_xray_executable", return_value=Path("C:/portable/xray/xray.exe")),
+            mock.patch("cfopt.xray_node.subprocess.Popen", side_effect=OSError("bad executable")),
+        ):
+            with self.assertRaises(XrayRuntimeError):
+                verify_node_candidate("104.18.1.2", 7, threading.Event(), profile=profile)
+
     def test_config_preserves_node_and_changes_only_server(self) -> None:
         profile = parse_node_profile(LINK)
         config = json.loads(build_xray_config(profile, "104.18.1.2", 32123))

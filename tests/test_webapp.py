@@ -13,7 +13,9 @@ from unittest.mock import patch
 
 from cfopt.cloudflare_dns import CloudflareDnsError, DnsSyncPlan, DnsSyncResult
 from cfopt.models import MAX_BANDWIDTH, FamilyRunResult, IpMetric, OptimizerResult
+from cfopt.node_template import parse_node_profile
 from cfopt.webapp import RuntimeState, _apply_dns_sync, _csv_bytes, _result_champions, _traffic_upper_bound_mb, make_handler
+from cfopt.xray_node import XrayRuntimeError
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,6 +111,34 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(values["ip"], "104.16.0.1")
         for key in ("server", "port", "sni", "host", "ws_path"):
             self.assertEqual(values[key], "")
+
+    def test_argo_csv_preserves_distinct_sni_and_ws_host(self) -> None:
+        family = FamilyRunResult(
+            "IPv4", [IpMetric("104.16.0.1", "IPv4", node_delay_ms=88.0)], []
+        )
+        result = OptimizerResult(
+            created_at="2026-01-01T00:00:00Z", mode="reference", operator="自动",
+            requested_family="ipv4", ip_count=1, target_host="tls.example.com",
+            source_kind="在线维护 IP 池", families=[family], elapsed_seconds=1.0,
+            purpose="argo", node_port=443, node_sni="tls.example.com",
+            node_host="ws.example.com", ws_path="/argo",
+        )
+        rows = list(csv.reader(io.StringIO(_csv_bytes(result).decode("utf-8-sig"))))
+        values = dict(zip(rows[0], rows[1]))
+        self.assertEqual(values["sni"], "tls.example.com")
+        self.assertEqual(values["host"], "ws.example.com")
+
+    def test_runtime_state_rejects_missing_xray_before_starting_worker(self) -> None:
+        state = RuntimeState()
+        profile = parse_node_profile(TEST_NODE_LINK)
+        with patch(
+            "cfopt.webapp.validate_xray_runtime",
+            side_effect=XrayRuntimeError("内置 Xray 核心无法启动"),
+        ):
+            ok, message = state.start({"_node_profile": profile})
+        self.assertFalse(ok)
+        self.assertIn("Xray", message)
+        self.assertIsNone(state.worker)
 
     def test_direct_csv_emits_only_ip_as_node_server_and_target_status(self) -> None:
         family = FamilyRunResult(

@@ -25,6 +25,10 @@ class XrayNodeError(RuntimeError):
     pass
 
 
+class XrayRuntimeError(XrayNodeError):
+    """The local Xray program is missing or cannot be executed at all."""
+
+
 def find_xray_executable(explicit: str | os.PathLike[str] | None = None) -> Path:
     candidates: list[Path] = []
     if explicit:
@@ -47,6 +51,29 @@ def find_xray_executable(explicit: str | os.PathLike[str] | None = None) -> Path
         if resolved.is_file():
             return resolved
     raise XrayNodeError("未找到内置 Xray 核心；请重新下载完整便携版并保持 xray 文件夹不变")
+
+
+def validate_xray_runtime(explicit: str | os.PathLike[str] | None = None) -> Path:
+    """Resolve and launch Xray once before any bandwidth-consuming scan starts."""
+
+    xray = find_xray_executable(explicit)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    try:
+        checked = subprocess.run(
+            [str(xray), "version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=5,
+            creationflags=flags,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise XrayRuntimeError("内置 Xray 核心无法启动；请重新下载完整便携版") from exc
+    banner = checked.stdout.decode("utf-8", "replace")[:512]
+    if checked.returncode != 0 or "xray" not in banner.lower():
+        raise XrayRuntimeError("内置 Xray 核心自检失败；请重新下载完整便携版")
+    return xray
 
 
 def build_xray_config(profile: NodeProfile, candidate_ip: str, socks_port: int) -> str:
@@ -187,20 +214,23 @@ def verify_node_candidate(
         normalized_ip = str(ipaddress.ip_address(target_ip))
     except ValueError:
         return ProbeResult(ok=False, error="候选不是有效 IP", target_ip=str(target_ip))
+    xray = find_xray_executable(xray_executable)
     process: subprocess.Popen[bytes] | None = None
     deadline = time.monotonic() + max(5.0, min(float(timeout_sec), 15.0))
     try:
-        xray = find_xray_executable(xray_executable)
         port = _free_loopback_port()
         config = build_xray_config(profile, normalized_ip, port).encode("utf-8")
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-        process = subprocess.Popen(
-            [str(xray), "run", "-c", "stdin:"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=flags,
-        )
+        try:
+            process = subprocess.Popen(
+                [str(xray), "run", "-c", "stdin:"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=flags,
+            )
+        except OSError as exc:
+            raise XrayRuntimeError("内置 Xray 核心无法启动；本轮已停止以避免继续消耗流量") from exc
         if process.stdin is None:
             raise XrayNodeError("无法把节点配置交给 Xray")
         process.stdin.write(config)
@@ -223,6 +253,8 @@ def verify_node_candidate(
             ttfb_ms=delay_ms,
             total_ms=delay_ms,
         )
+    except XrayRuntimeError:
+        raise
     except (OSError, ValueError, TimeoutError, XrayNodeError, ssl.SSLError) as exc:
         return ProbeResult(ok=False, error=f"{type(exc).__name__}: {str(exc)[:140]}", target_ip=normalized_ip, sni=profile.route.sni)
     finally:
@@ -240,7 +272,9 @@ __all__ = [
     "DELAY_TEST_PATH",
     "NodeProfile",
     "XrayNodeError",
+    "XrayRuntimeError",
     "build_xray_config",
     "find_xray_executable",
+    "validate_xray_runtime",
     "verify_node_candidate",
 ]

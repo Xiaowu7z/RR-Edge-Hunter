@@ -28,7 +28,6 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = "CF-IP-Optimizer"
 WINDOWS_TARGET = "Windows-x64"
-LINUX_TARGET = "Linux-x64"
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -66,9 +65,9 @@ def _valid_version(value: str) -> str:
 def _host_target() -> str:
     if sys.platform == "win32":
         return WINDOWS_TARGET
-    if sys.platform.startswith("linux"):
-        return LINUX_TARGET
-    raise RuntimeError(f"当前平台暂不支持 PyInstaller 便携包：{platform.system() or sys.platform}")
+    raise RuntimeError(
+        f"本仓库只发布含内置 Xray 的 Windows x64 便携包；当前平台为 {platform.system() or sys.platform}"
+    )
 
 
 def _safe_relative(name: str) -> PurePosixPath:
@@ -159,7 +158,7 @@ def _run_pyinstaller(source_root: Path, staging_root: Path) -> Path:
 
 
 def _write_user_guide(bundle: Path, target: str, version: str) -> None:
-    executable = f"{APP_NAME}{'.exe' if target == WINDOWS_TARGET else ''}"
+    executable = f"{APP_NAME}.exe"
     guide = (
         "CF 优选IP（RR Edge Hunter）便携版\n"
         f"版本：{version}\n\n"
@@ -188,7 +187,7 @@ def _install_xray_runtime(bundle: Path, executable: Path, license_file: Path) ->
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a self-contained RR Edge Hunter portable desktop ZIP")
     parser.add_argument("--version", required=True, help="Release version with or without the v prefix")
-    parser.add_argument("--target", choices=("auto", WINDOWS_TARGET, LINUX_TARGET), default="auto")
+    parser.add_argument("--target", choices=("auto", WINDOWS_TARGET), default="auto")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
     parser.add_argument("--xray-exe", type=Path, help="Pinned official Xray Windows executable")
     parser.add_argument("--xray-license", type=Path, help="Xray-core license file from the same archive")
@@ -202,7 +201,7 @@ def main() -> int:
     target = host_target if args.target == "auto" else args.target
     if target != host_target:
         raise SystemExit(f"{target} 只能在对应平台构建；当前为 {host_target}")
-    if target == WINDOWS_TARGET and (args.xray_exe is None or args.xray_license is None):
+    if args.xray_exe is None or args.xray_license is None:
         raise SystemExit("Windows 便携版必须提供经过校验的 --xray-exe 与 --xray-license")
     try:
         import PyInstaller  # noqa: F401
@@ -220,13 +219,11 @@ def main() -> int:
         _export_head(source_root)
         (source_root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
         bundle = _run_pyinstaller(source_root, staging_root)
-        xray_sha256 = ""
-        if target == WINDOWS_TARGET:
-            xray_sha256 = _install_xray_runtime(bundle, args.xray_exe.resolve(), args.xray_license.resolve())
+        xray_sha256 = _install_xray_runtime(bundle, args.xray_exe.resolve(), args.xray_license.resolve())
         _write_user_guide(bundle, target, version)
         _archive_directory(bundle, APP_NAME, archive)
 
-    executable = f"{APP_NAME}{'.exe' if target == WINDOWS_TARGET else ''}"
+    executable = f"{APP_NAME}.exe"
     metadata = {
         "archive": archive.name,
         "entrypoint": f"{APP_NAME}/{executable}",

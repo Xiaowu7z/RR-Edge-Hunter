@@ -47,7 +47,7 @@ from .pipeline import (
 from .hostnames import HostnameError, normalize_hostname
 from .resources import package_root
 from .version import VERSION
-from .xray_node import verify_node_candidate
+from .xray_node import XrayNodeError, validate_xray_runtime, verify_node_candidate
 
 
 WEB_DIR = package_root() / "web"
@@ -224,6 +224,16 @@ class RuntimeState:
                 del self.logs[:-400]
 
     def start(self, config: dict[str, Any], *, scheduled: bool = False) -> tuple[bool, str]:
+        prepared = dict(config)
+        node_profile = prepared.get("_node_profile")
+        if isinstance(node_profile, NodeProfile):
+            try:
+                prepared["_xray_executable"] = str(
+                    validate_xray_runtime(prepared.get("_xray_executable"))
+                )
+            except XrayNodeError as exc:
+                return False, f"无法开始：{exc}"
+        config = prepared
         with self.lock:
             if scheduled and (
                 not self.automation_enabled
@@ -266,7 +276,11 @@ class RuntimeState:
                     self.log(f"IP 订阅刷新失败，继续使用上次已载入快照：{exc}")
             node_profile = run_config.get("_node_profile")
             compatibility_fn = (
-                functools.partial(verify_node_candidate, profile=node_profile)
+                functools.partial(
+                    verify_node_candidate,
+                    profile=node_profile,
+                    xray_executable=run_config.get("_xray_executable"),
+                )
                 if isinstance(node_profile, NodeProfile)
                 else None
             )
@@ -287,6 +301,9 @@ class RuntimeState:
                 log=self.log,
                 compatibility_fn=compatibility_fn,
             )
+            if isinstance(node_profile, NodeProfile):
+                result.node_sni = node_profile.route.sni
+                result.node_host = node_profile.route.host_header
             with self.lock:
                 self.result = result
                 self.status = "cancelled" if result.cancelled else "completed"
@@ -312,6 +329,16 @@ class RuntimeState:
     def start_automation(self, config: dict[str, Any], interval_minutes: int) -> tuple[bool, str]:
         if not MIN_AUTOMATION_INTERVAL_MINUTES <= interval_minutes <= MAX_AUTOMATION_INTERVAL_MINUTES:
             return False, f"自动运行间隔必须在 {MIN_AUTOMATION_INTERVAL_MINUTES}–{MAX_AUTOMATION_INTERVAL_MINUTES} 分钟之间"
+        prepared = dict(config)
+        node_profile = prepared.get("_node_profile")
+        if isinstance(node_profile, NodeProfile):
+            try:
+                prepared["_xray_executable"] = str(
+                    validate_xray_runtime(prepared.get("_xray_executable"))
+                )
+            except XrayNodeError as exc:
+                return False, f"无法开启定时优选：{exc}"
+        config = prepared
         with self.lock:
             if self.automation_enabled:
                 return False, "定时自动优选已在运行"
@@ -468,6 +495,8 @@ class RuntimeState:
 def _csv_bytes(result: OptimizerResult) -> bytes:
     argo = result.purpose == PURPOSE_ARGO
     node_output = result.purpose in {PURPOSE_DIRECT, PURPOSE_ARGO}
+    node_sni = result.node_sni or result.target_host
+    node_host = result.node_host or node_sni
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow([
@@ -481,7 +510,7 @@ def _csv_bytes(result: OptimizerResult) -> bytes:
             writer.writerow([
                 family.family, index, item.ip, item.ip if node_output else "", result.target_mbps,
                 "yes" if item.round_floor_mbps >= result.target_mbps else "no", result.node_port if argo else "",
-                result.target_host if argo else "", result.target_host if argo else "", result.ws_path if argo else "",
+                node_sni if argo else "", node_host if argo else "", result.ws_path if argo else "",
                 item.peak_kbps, item.latency_ms, item.scan_round, item.data_center,
                 "TLS" if item.use_tls else "plain HTTP", result.measurement_host, result.measurement_port,
                 f"{item.round_floor_mbps:.3f}", f"{item.avg_complete_mbps:.3f}",
