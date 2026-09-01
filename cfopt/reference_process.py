@@ -90,6 +90,13 @@ def _start(
     working = cache_dir or reference_cache_dir()
     working.mkdir(parents=True, exist_ok=True)
     kwargs: dict[str, object] = {}
+    child_env = os.environ.copy()
+    # Windows runners and some user locales default child Python processes to
+    # a legacy code page.  The reference engine itself emits UTF-8, so keep the
+    # entire subprocess boundary UTF-8 as well.  This does not alter the engine
+    # or its parameters; it only makes its Chinese progress output decodable.
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    child_env["PYTHONUTF8"] = "1"
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
@@ -103,6 +110,7 @@ def _start(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
+            env=child_env,
             **kwargs,
         )
     except OSError as exc:
