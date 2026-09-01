@@ -140,6 +140,24 @@ class WebApiTest(unittest.TestCase):
         self.assertIn("Xray", message)
         self.assertIsNone(state.worker)
 
+    def test_cancelled_run_cannot_publish_winner_after_optimizer_returns(self) -> None:
+        state = RuntimeState()
+        completed = self._completed_result()
+
+        def finish_after_cancel(**kwargs):
+            kwargs["cancel_event"].set()
+            return completed
+
+        with patch("cfopt.webapp.run_optimizer", side_effect=finish_after_cancel):
+            ok, _message = state.start({"mode": "reference", "family": "ipv4"})
+            self.assertTrue(ok)
+            assert state.worker is not None
+            state.worker.join(timeout=2)
+        snapshot = state.snapshot()
+        self.assertEqual(snapshot["status"], "cancelled")
+        self.assertTrue(snapshot["result"]["cancelled"])
+        self.assertEqual(snapshot["result"]["families"], [])
+
     def test_direct_csv_emits_only_ip_as_node_server_and_target_status(self) -> None:
         family = FamilyRunResult(
             "IPv4", [IpMetric("104.16.0.1", "IPv4", round_floor_mbps=120.0)], []

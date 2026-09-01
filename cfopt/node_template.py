@@ -36,7 +36,11 @@ class NodeRouteTemplate:
 
 @dataclasses.dataclass(frozen=True, repr=False)
 class NodeProfile:
-    """One full local Xray outbound. The credential-bearing JSON is never public."""
+    """One full local Xray outbound. The credential-bearing JSON is never public.
+
+    The stored outbound is authoritative. Candidate testing only changes its
+    server address, preserving the exact transport, TLS, Host and credentials.
+    """
 
     route: NodeRouteTemplate
     outbound_json: str = dataclasses.field(repr=False)
@@ -105,18 +109,38 @@ def _decode_vmess(value: str) -> dict[str, object]:
     return payload
 
 
-def _stream_settings(*, sni: str, host: str, path: str, fingerprint: str = "", alpn: str = "") -> dict[str, object]:
-    tls: dict[str, object] = {"serverName": sni, "allowInsecure": False}
+def _stream_settings(
+    *,
+    sni: str,
+    host: str,
+    path: str,
+    fingerprint: str = "",
+    alpn: str = "",
+    allow_insecure: bool = False,
+    ech: str = "",
+    pinned_peer_cert_sha256: str = "",
+    verify_peer_cert_by_name: str = "",
+) -> dict[str, object]:
+    tls: dict[str, object] = {"serverName": sni, "allowInsecure": bool(allow_insecure)}
     if fingerprint:
         tls["fingerprint"] = fingerprint
     protocols = [item.strip() for item in alpn.split(",") if item.strip()]
     if protocols:
         tls["alpn"] = protocols
+    if ech:
+        tls["echConfigList"] = ech
+    if pinned_peer_cert_sha256:
+        tls["pinnedPeerCertSha256"] = pinned_peer_cert_sha256
+    if verify_peer_cert_by_name:
+        tls["verifyPeerCertByName"] = verify_peer_cert_by_name
     return {
         "network": "ws",
         "security": "tls",
         "tlsSettings": tls,
-        "wsSettings": {"path": path, "headers": {"Host": host}},
+        # Xray-core's native field has priority Host > TLS serverName >
+        # destination. Keep an explicit effective Host so changing only the
+        # destination IP cannot change an address-derived share-link Host.
+        "wsSettings": {"path": path, "host": host},
     }
 
 
@@ -219,6 +243,10 @@ def parse_node_profile(value: object) -> NodeProfile:
                 path=route.ws_path,
                 fingerprint=first("fp").strip(),
                 alpn=first("alpn").strip(),
+                allow_insecure=first("insecure").strip() == "1",
+                ech=first("ech").strip(),
+                pinned_peer_cert_sha256=first("pcs").strip(),
+                verify_peer_cert_by_name=first("vcn").strip(),
             ),
         }
         return NodeProfile(route, json.dumps(outbound, ensure_ascii=False, separators=(",", ":")))

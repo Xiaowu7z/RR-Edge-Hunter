@@ -40,7 +40,32 @@ class NodeTemplateTest(unittest.TestCase):
         self.assertEqual(endpoint["port"], 8443)
         self.assertEqual(endpoint["users"][0]["id"], "12345678-abcd-abcd-abcd-123456789abc")
         self.assertEqual(outbound["streamSettings"]["tlsSettings"]["serverName"], "tls.example.com")
-        self.assertEqual(outbound["streamSettings"]["wsSettings"]["headers"]["Host"], "ws.example.com")
+        self.assertEqual(outbound["streamSettings"]["wsSettings"]["host"], "ws.example.com")
+
+    def test_address_derived_tls_and_ws_host_survive_candidate_replacement(self):
+        profile = parse_node_profile(
+            "vless://12345678-abcd-abcd-abcd-123456789abc@origin.example:2053"
+            "?type=ws&security=tls&path=%2Fargo"
+        )
+        outbound = profile.outbound_for("104.18.1.3")
+        stream = outbound["streamSettings"]
+        self.assertEqual(outbound["settings"]["vnext"][0]["address"], "104.18.1.3")
+        self.assertEqual(stream["tlsSettings"]["serverName"], "origin.example")
+        self.assertEqual(stream["wsSettings"]["host"], "origin.example")
+
+    def test_vless_preserves_v2rayng_tls_extensions(self):
+        profile = parse_node_profile(
+            "vless://12345678-abcd-abcd-abcd-123456789abc@origin.example:443"
+            "?type=ws&security=tls&sni=tls.example.com&host=ws.example.com&path=%2Fargo"
+            "&fp=chrome&alpn=h2%2Chttp%2F1.1&insecure=1&ech=ech-value&pcs=cert-pin&vcn=verify.example.com"
+        )
+        tls = profile.outbound_for("104.18.1.4")["streamSettings"]["tlsSettings"]
+        self.assertEqual(tls["fingerprint"], "chrome")
+        self.assertEqual(tls["alpn"], ["h2", "http/1.1"])
+        self.assertTrue(tls["allowInsecure"])
+        self.assertEqual(tls["echConfigList"], "ech-value")
+        self.assertEqual(tls["pinnedPeerCertSha256"], "cert-pin")
+        self.assertEqual(tls["verifyPeerCertByName"], "verify.example.com")
 
 
 if __name__ == "__main__":

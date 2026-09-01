@@ -8,6 +8,7 @@ from cfopt.models import ASIA_HUNT, BALANCED, MAX_BANDWIDTH, IpMetric, ProbeResu
 from cfopt.pipeline import (
     MAX_CANDIDATES_PER_FAMILY,
     NetworkChanged,
+    OptimizerCancelled,
     RESTRICTED_PUBLIC_SOURCE,
     _run_fast_speed_stage,
     _run_parallel_rtt_rounds,
@@ -73,6 +74,26 @@ class CoreRulesTest(unittest.TestCase):
 
     def test_full_schedule_repeats_every_finalist(self) -> None:
         self.assertEqual(full_schedule(["104.16.0.1", "104.16.0.2"], 3), ["104.16.0.1"] * 3 + ["104.16.0.2"] * 3)
+
+    def test_cancel_after_candidate_gate_cannot_publish_result(self) -> None:
+        cancel = threading.Event()
+
+        def gate(_ip: str) -> bool:
+            cancel.set()
+            return True
+
+        with self.assertRaises(OptimizerCancelled):
+            _run_fast_speed_stage(
+                ["104.16.0.2"],
+                BALANCED,
+                100,
+                cancel,
+                lambda *_args: None,
+                lambda _message: None,
+                _speed_ok,
+                "IPv4",
+                candidate_gate=gate,
+            )
 
     def test_imported_ip_must_intersect_current_dns_assignment(self) -> None:
         with patch("cfopt.pipeline.network_fingerprint", return_value=("", "")):

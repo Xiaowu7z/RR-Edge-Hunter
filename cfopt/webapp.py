@@ -260,12 +260,18 @@ class RuntimeState:
             self.error = ""
             self.dns_manual_plans.clear()
             self.config = self._public_config(config)
-            self.cancel_event = threading.Event()
-            self.worker = threading.Thread(target=self._work, args=(config,), name="rr-edge-hunter", daemon=True)
+            run_cancel_event = threading.Event()
+            self.cancel_event = run_cancel_event
+            self.worker = threading.Thread(
+                target=self._work,
+                args=(config, run_cancel_event),
+                name="rr-edge-hunter",
+                daemon=True,
+            )
             self.worker.start()
         return True, "定时优选已开始" if scheduled else "优选已开始"
 
-    def _work(self, config: dict[str, Any]) -> None:
+    def _work(self, config: dict[str, Any], run_cancel_event: threading.Event) -> None:
         try:
             run_config = dict(config)
             subscription_url = str(run_config.get("_subscription_url", ""))
@@ -299,7 +305,7 @@ class RuntimeState:
                 ws_path=str(run_config.get("ws_path", "")),
                 target_mbps=int(run_config.get("target_mbps", 100)),
                 use_tls=bool(run_config.get("use_tls", True)),
-                cancel_event=self.cancel_event,
+                cancel_event=run_cancel_event,
                 on_stage=self.on_stage,
                 log=self.log,
                 compatibility_fn=compatibility_fn,
@@ -307,6 +313,11 @@ class RuntimeState:
             if isinstance(node_profile, NodeProfile):
                 result.node_sni = node_profile.route.sni
                 result.node_host = node_profile.route.host_header
+            # Stop can race with the final native/Xray response. Never expose
+            # or persist a winner once this exact run has been cancelled.
+            if run_cancel_event.is_set():
+                result.cancelled = True
+                result.families.clear()
             with self.lock:
                 self.result = result
                 self.status = "cancelled" if result.cancelled else "completed"

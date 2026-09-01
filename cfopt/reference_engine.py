@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from .history import data_dir
-from .models import FamilyRunResult, IpMetric, OptimizerResult, ProbeResult
+from .models import FamilyRunResult, IpMetric, NODE_GATE_TIMEOUT_SECONDS, OptimizerResult, ProbeResult
 from .ranges import FALLBACK_V4, FALLBACK_V6
 
 
@@ -619,7 +619,8 @@ def run_reference_family(
             route: ProbeResult | None = None
             if compatibility_fn is not None and compatibility_host:
                 on_stage("V2rayNG 同口径节点复核", 0, 1, rtt.candidate.ip)
-                route = compatibility_fn(rtt.candidate.ip, 7, cancel_event)
+                route = compatibility_fn(rtt.candidate.ip, NODE_GATE_TIMEOUT_SECONDS, cancel_event)
+                _cancelled(cancel_event)
                 on_stage("V2rayNG 同口径节点复核", 1, 1, rtt.candidate.ip)
                 if not (route.ok and route.cert_verified and route.target_matches_remote):
                     log(f"{rtt.candidate.ip} 达到带宽，但完整节点在 Xray 中未连通，继续下一个")

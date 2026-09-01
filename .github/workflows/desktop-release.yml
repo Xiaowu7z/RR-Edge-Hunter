@@ -109,7 +109,7 @@ jobs:
           printf '%s\n\n%s\n\n%s\n' \
             "CF 优选IP Windows 正式版 1.0.0" \
             "构建提交：\`$GITHUB_SHA\`" \
-            "仅提供免安装便携版，解压后运行 CF-IP-Optimizer.exe；内置官方 Xray-core，候选必须用完整 VMess/VLESS 节点通过 V2rayNG 默认 generate_204 同口径测试；同时包含真实下载测速、IPv4/IPv6、定时运行与 Cloudflare A/AAAA 灰云同步。" \
+            "仅提供免安装便携版，解压后运行 CF-IP-Optimizer.exe；内置官方 Xray-core，候选必须用完整 VMess/VLESS 节点通过 V2rayNG/libXray 同口径的 5 秒 HEAD generate_204 门禁；同时包含真实下载测速、IPv4/IPv6、定时运行与 Cloudflare A/AAAA 灰云同步。" \
             > "$NOTES_FILE"
 
           while IFS= read -r OLD_TAG; do
