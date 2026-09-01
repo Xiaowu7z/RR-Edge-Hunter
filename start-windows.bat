@@ -25,7 +25,17 @@ if defined PYTHON_DETECTED goto :python_too_old
 goto :python_missing
 
 :run
+where /q go
+if errorlevel 1 goto :go_missing
 %PYTHON_COMMAND% rr_optimizer.py ui %*
+goto :end
+
+:go_missing
+echo.
+echo [RR Edge Hunter] 源码运行需要 Go 1.22 或更高版本。
+echo 正式便携版已内置参考程序，不需要安装 Go。
+echo.
+pause
 goto :end
 
 :python_missing

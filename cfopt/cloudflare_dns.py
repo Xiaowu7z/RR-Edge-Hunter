@@ -33,14 +33,12 @@ class CloudflareDnsError(Exception):
         code: str = "cloudflare_dns_error",
         http_status: int | None = None,
         transient: bool = False,
-        pause_dns_automation: bool = False,
     ) -> None:
         super().__init__(message)
         self.message = message
         self.code = code
         self.http_status = http_status
         self.transient = transient
-        self.pause_dns_automation = pause_dns_automation
 
     def to_dict(self) -> dict[str, Any]:
         # Never include request headers, response bodies, or the API token here.
@@ -49,7 +47,6 @@ class CloudflareDnsError(Exception):
             "message": self.message,
             "http_status": self.http_status,
             "transient": self.transient,
-            "pause_dns_automation": self.pause_dns_automation,
         }
 
 
@@ -326,10 +323,9 @@ class CloudflareDnsClient:
         status = int(response.status)
         if status in {401, 403}:
             raise CloudflareDnsError(
-                "Cloudflare API 鉴权失败；已请求暂停 DNS 自动写入",
+                "Cloudflare API 鉴权失败；请检查 Token 与目标 Zone 权限",
                 code="auth_failed",
                 http_status=status,
-                pause_dns_automation=True,
             )
         if status == 429:
             raise CloudflareDnsError(

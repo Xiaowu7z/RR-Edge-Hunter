@@ -1,5 +1,5 @@
-"""RR Edge Hunter desktop IP measurement engine."""
+"""RR UI wrapper for the supplied better-cloudflare-ip engine."""
 
-from .models import ASIA_HUNT, BALANCED, ModeParams
+from .reference_process import ReferenceResult
 
-__all__ = ["ASIA_HUNT", "BALANCED", "ModeParams"]
+__all__ = ["ReferenceResult"]

@@ -66,7 +66,7 @@ def _host_target() -> str:
     if sys.platform == "win32":
         return WINDOWS_TARGET
     raise RuntimeError(
-        f"本仓库只发布含内置 Xray 的 Windows x64 便携包；当前平台为 {platform.system() or sys.platform}"
+        f"本仓库只发布含参考原版引擎的 Windows x64 便携包；当前平台为 {platform.system() or sys.platform}"
     )
 
 
@@ -166,22 +166,22 @@ def _write_user_guide(bundle: Path, target: str, version: str) -> None:
         f"1. 保持本文件与 {executable} 及 _internal 文件夹在同一目录。\n"
         f"2. 双击 {executable}。\n"
         "3. 程序会自动在默认浏览器打开本机界面；测速记录只保存在本机。\n\n"
-        "此版本已内置 Python 与 Xray 运行环境，无需安装。\n"
-        "请不要单独移动或删除 _internal、xray 文件夹。\n"
+        "此版本已内置 Python 与 better-cloudflare-ip 原版程序，无需安装。\n"
+        "请不要单独移动或删除 _internal 文件夹。\n"
     )
     (bundle / "使用说明.txt").write_text(guide, encoding="utf-8")
 
 
-def _install_xray_runtime(bundle: Path, executable: Path, license_file: Path) -> str:
-    if not executable.is_file() or executable.name.lower() != "xray.exe":
-        raise RuntimeError("便携版缺少经过校验的 xray.exe")
-    if not license_file.is_file():
-        raise RuntimeError("便携版缺少 Xray-core LICENSE")
-    runtime = bundle / "xray"
+def _install_reference_engine(bundle: Path, executable: Path) -> str:
+    if not executable.is_file() or executable.name.lower() != "better-cloudflare-ip.exe":
+        raise RuntimeError("便携版缺少经过校验的 better-cloudflare-ip.exe")
+    resource_root = bundle / "_internal"
+    if not resource_root.is_dir():
+        raise RuntimeError("PyInstaller 便携目录缺少 _internal")
+    runtime = resource_root / "reference-engine"
     runtime.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(executable, runtime / "xray.exe")
-    shutil.copy2(license_file, runtime / "Xray-core-LICENSE.txt")
-    return _sha256(runtime / "xray.exe")
+    shutil.copy2(executable, runtime / "better-cloudflare-ip.exe")
+    return _sha256(runtime / "better-cloudflare-ip.exe")
 
 
 def main() -> int:
@@ -189,8 +189,7 @@ def main() -> int:
     parser.add_argument("--version", required=True, help="Release version with or without the v prefix")
     parser.add_argument("--target", choices=("auto", WINDOWS_TARGET), default="auto")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
-    parser.add_argument("--xray-exe", type=Path, help="Pinned official Xray Windows executable")
-    parser.add_argument("--xray-license", type=Path, help="Xray-core license file from the same archive")
+    parser.add_argument("--engine-exe", type=Path, help="从仓库固定 main.go 编译的 Windows 参考程序")
     args = parser.parse_args()
 
     try:
@@ -201,8 +200,8 @@ def main() -> int:
     target = host_target if args.target == "auto" else args.target
     if target != host_target:
         raise SystemExit(f"{target} 只能在对应平台构建；当前为 {host_target}")
-    if args.xray_exe is None or args.xray_license is None:
-        raise SystemExit("Windows 便携版必须提供经过校验的 --xray-exe 与 --xray-license")
+    if args.engine_exe is None:
+        raise SystemExit("Windows 便携版必须提供经过校验的 --engine-exe")
     try:
         import PyInstaller  # noqa: F401
     except ModuleNotFoundError as exc:
@@ -219,7 +218,7 @@ def main() -> int:
         _export_head(source_root)
         (source_root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
         bundle = _run_pyinstaller(source_root, staging_root)
-        xray_sha256 = _install_xray_runtime(bundle, args.xray_exe.resolve(), args.xray_license.resolve())
+        engine_sha256 = _install_reference_engine(bundle, args.engine_exe.resolve())
         _write_user_guide(bundle, target, version)
         _archive_directory(bundle, APP_NAME, archive)
 
@@ -232,8 +231,9 @@ def main() -> int:
         "sha256": _sha256(archive),
         "source_revision": _git("rev-parse", "HEAD").decode("ascii").strip(),
         "version": version,
-        "xray_sha256": xray_sha256,
-        "xray_version": "v26.7.28" if xray_sha256 else "",
+        "reference_engine_sha256": engine_sha256,
+        "reference_source_revision": "badafans/better-cloudflare-ip@c4f4cdd4c44243c964e68881a451d8e1f3fd5210",
+        "reference_source_sha256": "83663f1e2655943ebae2d99d520a35f8c5dd58142ac58cf2169220e35deb11ab",
     }
     manifest.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     checksum.write_text(f"{metadata['sha256']}  {archive.name}\n", encoding="utf-8")
