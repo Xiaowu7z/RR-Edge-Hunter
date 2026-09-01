@@ -1,4 +1,5 @@
 __pycache__/
+runtime/
 *.py[cod]
 rr-optimizer-result.json
 rr-optimizer-result.csv

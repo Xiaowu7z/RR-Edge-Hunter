@@ -13,10 +13,16 @@ from unittest.mock import patch
 
 from cfopt.cloudflare_dns import CloudflareDnsError, DnsSyncPlan, DnsSyncResult
 from cfopt.models import MAX_BANDWIDTH, FamilyRunResult, IpMetric, OptimizerResult
+from cfopt.node_template import parse_node_profile
 from cfopt.webapp import RuntimeState, _apply_dns_sync, _csv_bytes, _result_champions, _traffic_upper_bound_mb, make_handler
+from cfopt.xray_node import XrayRuntimeError
 
 
 ROOT = Path(__file__).resolve().parents[1]
+TEST_NODE_LINK = (
+    "vless://12345678-abcd-abcd-abcd-123456789abc@104.18.0.1:8443"
+    "?type=ws&security=tls&sni=argo.example.com&host=argo.example.com&path=%2Fvless%3Fed%3D2048"
+)
 
 
 class CapturingState(RuntimeState):
@@ -72,12 +78,12 @@ class WebApiTest(unittest.TestCase):
             body = json.load(response)
         self.assertEqual(body["version"], "0.1.0")
         self.assertEqual(body["request_token"], self.token)
-        self.assertEqual(body["default_purpose"], "direct")
+        self.assertEqual(body["default_purpose"], "argo")
         self.assertEqual(body["default_node_port"], 443)
         self.assertEqual(body["target_mbps"]["default"], 100)
         self.assertGreater(body["max_custom_ips"], 0)
-        self.assertEqual(body["modes"]["max"]["micro_candidates"], 20)
-        self.assertEqual(body["modes"]["max"]["pre_concurrency"], 50)
+        self.assertEqual(set(body["modes"]), {"reference"})
+        self.assertEqual(body["modes"]["reference"]["pre_concurrency"], 50)
 
     def test_web_traffic_bound_covers_two_samples_for_every_shortlisted_ip(self) -> None:
         expected = round(
@@ -105,6 +111,34 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(values["ip"], "104.16.0.1")
         for key in ("server", "port", "sni", "host", "ws_path"):
             self.assertEqual(values[key], "")
+
+    def test_argo_csv_preserves_distinct_sni_and_ws_host(self) -> None:
+        family = FamilyRunResult(
+            "IPv4", [IpMetric("104.16.0.1", "IPv4", node_delay_ms=88.0)], []
+        )
+        result = OptimizerResult(
+            created_at="2026-01-01T00:00:00Z", mode="reference", operator="自动",
+            requested_family="ipv4", ip_count=1, target_host="tls.example.com",
+            source_kind="在线维护 IP 池", families=[family], elapsed_seconds=1.0,
+            purpose="argo", node_port=443, node_sni="tls.example.com",
+            node_host="ws.example.com", ws_path="/argo",
+        )
+        rows = list(csv.reader(io.StringIO(_csv_bytes(result).decode("utf-8-sig"))))
+        values = dict(zip(rows[0], rows[1]))
+        self.assertEqual(values["sni"], "tls.example.com")
+        self.assertEqual(values["host"], "ws.example.com")
+
+    def test_runtime_state_rejects_missing_xray_before_starting_worker(self) -> None:
+        state = RuntimeState()
+        profile = parse_node_profile(TEST_NODE_LINK)
+        with patch(
+            "cfopt.webapp.validate_xray_runtime",
+            side_effect=XrayRuntimeError("内置 Xray 核心无法启动"),
+        ):
+            ok, message = state.start({"_node_profile": profile})
+        self.assertFalse(ok)
+        self.assertIn("Xray", message)
+        self.assertIsNone(state.worker)
 
     def test_direct_csv_emits_only_ip_as_node_server_and_target_status(self) -> None:
         family = FamilyRunResult(
@@ -136,7 +170,7 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, 403)
 
     def test_custom_start_passes_only_normalized_user_ips(self) -> None:
-        with self._post("/api/start", {"mode": "balanced", "family": "ipv4", "operator": "中国移动", "source": "custom", "ips": ["104.16.0.1", "104.16.0.1", "2606:4700::1111"], "target_mbps": 200, "confirmed": True}) as response:
+        with self._post("/api/start", {"mode": "reference", "family": "ipv4", "operator": "中国移动", "source": "custom", "ips": ["104.16.0.1", "104.16.0.1", "2606:4700::1111"], "target_mbps": 200, "confirmed": True}) as response:
             body = json.load(response)
         self.assertTrue(body["ok"])
         self.assertEqual(self.state.submitted_config["_ips"], ["104.16.0.1", "2606:4700::1111"])
@@ -146,10 +180,10 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(self.state.submitted_config["target_mbps"], 200)
         self.assertGreater(self.state.submitted_config["traffic_upper_bound_mb"], 0)
 
-    def test_argo_start_preserves_node_parameters_without_credentials(self) -> None:
+    def test_argo_start_parses_full_node_but_keeps_credentials_private(self) -> None:
         payload = {
-            "purpose": "argo", "mode": "balanced", "family": "ipv4", "operator": "自动",
-            "target_host": "argo.example.com", "node_port": 8443, "ws_path": "/vless?ed=2048",
+            "purpose": "argo", "mode": "reference", "family": "ipv4", "operator": "自动",
+            "node_link": TEST_NODE_LINK,
             "source": "dns", "confirmed": True,
         }
         with self._post("/api/start", payload) as response:
@@ -157,26 +191,29 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(self.state.submitted_config["target_host"], "argo.example.com")
         self.assertEqual(self.state.submitted_config["node_port"], 8443)
         self.assertEqual(self.state.submitted_config["ws_path"], "/vless?ed=2048")
-        self.assertNotIn("uuid", self.state.submitted_config)
+        self.assertEqual(self.state.submitted_config["node_protocol"], "VLESS")
+        self.assertNotIn("12345678", repr(self.state.submitted_config))
 
-    def test_argo_start_rejects_url_ip_port_and_unsafe_ws_path(self) -> None:
-        base = {"purpose": "argo", "mode": "balanced", "family": "ipv4", "source": "dns", "confirmed": True}
-        for host in ("https://argo.example.com/path", "104.16.0.1", "argo.example.com:443"):
-            with self.subTest(host=host), self.assertRaises(urllib.error.HTTPError) as raised:
-                self._post("/api/start", {**base, "target_host": host})
+    def test_argo_start_rejects_missing_malformed_or_unsupported_node(self) -> None:
+        base = {"purpose": "argo", "mode": "reference", "family": "ipv4", "source": "dns", "confirmed": True}
+        for link in (
+            "",
+            "https://argo.example.com/path",
+            "vless://bad-uuid@example.com:443?type=ws&security=tls&host=example.com",
+            "vless://12345678-abcd-abcd-abcd-123456789abc@example.com:443?type=tcp&security=tls",
+        ):
+            with self.subTest(link=link), self.assertRaises(urllib.error.HTTPError) as raised:
+                self._post("/api/start", {**base, "node_link": link})
             self.assertEqual(raised.exception.code, 400)
-        with self.assertRaises(urllib.error.HTTPError) as raised:
-            self._post("/api/start", {**base, "target_host": "argo.example.com", "ws_path": "/ws%zz"})
-        self.assertEqual(raised.exception.code, 400)
 
     def test_start_requires_explicit_traffic_confirmation(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as raised:
-            self._post("/api/start", {"mode": "balanced", "family": "ipv4", "target_host": "speed.cloudflare.com", "source": "dns"})
+            self._post("/api/start", {"mode": "reference", "family": "ipv4", "target_host": "speed.cloudflare.com", "source": "dns"})
         self.assertEqual(raised.exception.code, 400)
 
     def test_direct_start_needs_no_domain_and_ignores_host_port_path(self) -> None:
         payload = {
-            "mode": "asia", "family": "ipv4", "source": "dns", "confirmed": True,
+            "mode": "reference", "family": "ipv4", "source": "dns", "confirmed": True,
             "target_host": "https://attacker.example/path", "node_port": 1234,
             "ws_path": "/ws%zz", "target_mbps": 100,
         }
@@ -188,10 +225,17 @@ class WebApiTest(unittest.TestCase):
         self.assertEqual(self.state.submitted_config["ws_path"], "")
 
     def test_target_bandwidth_is_bounded(self) -> None:
-        base = {"mode": "balanced", "family": "ipv4", "source": "dns", "confirmed": True}
+        base = {"mode": "reference", "family": "ipv4", "source": "dns", "confirmed": True}
         for target in (0, 10001, True, "bad"):
             with self.subTest(target=target), self.assertRaises(urllib.error.HTTPError) as raised:
                 self._post("/api/start", {**base, "target_mbps": target})
+            self.assertEqual(raised.exception.code, 400)
+
+    def test_legacy_modes_are_not_accepted_by_the_public_api(self) -> None:
+        base = {"family": "ipv4", "source": "dns", "confirmed": True}
+        for mode in ("balanced", "asia", "max"):
+            with self.subTest(mode=mode), self.assertRaises(urllib.error.HTTPError) as raised:
+                self._post("/api/start", {**base, "mode": mode})
             self.assertEqual(raised.exception.code, 400)
 
     def test_dns_sync_requires_current_champion_zone_and_preview(self) -> None:
@@ -363,7 +407,7 @@ class WebApiTest(unittest.TestCase):
     def test_automation_dns_config_is_confirmed_and_kept_out_of_public_config(self) -> None:
         token = "secret-token-that-must-not-leak"
         body = {
-            "mode": "asia", "family": "ipv4", "operator": "自动", "source": "dns",
+            "mode": "reference", "family": "ipv4", "operator": "自动", "source": "dns",
             "confirmed": True, "interval_minutes": 30, "dns_write_confirmed": True,
             "dns_sync": {
                 "enabled": True, "record_name": "edge.example.com",
@@ -531,7 +575,7 @@ class WebApiTest(unittest.TestCase):
 
     def test_automation_start_receives_bounded_interval(self) -> None:
         body = {
-            "mode": "asia", "family": "dual", "operator": "自动", "target_host": "speed.cloudflare.com",
+            "mode": "reference", "family": "dual", "operator": "自动", "target_host": "speed.cloudflare.com",
             "source": "dns", "confirmed": True, "interval_minutes": 30,
         }
         with self._post("/api/automation/start", body) as response:
@@ -567,7 +611,7 @@ class WebApiTest(unittest.TestCase):
                 return True, "定时优选已开始"
 
         state = SchedulerState()
-        ok, _message = state.start_automation({"mode": "balanced", "family": "ipv4"}, 5)
+        ok, _message = state.start_automation({"mode": "reference", "family": "ipv4"}, 5)
         self.assertTrue(ok)
         self.assertTrue(state.started.wait(timeout=1))
         stopped, _message = state.stop()
@@ -581,24 +625,27 @@ class WebApiTest(unittest.TestCase):
         state = RuntimeState(
             automation_enabled=True,
             automation_generation=5,
-            automation_config={"mode": "asia", "family": "ipv4"},
+            automation_config={"mode": "reference", "family": "ipv4"},
         )
         ok, message = state.start({
-            "mode": "asia", "family": "ipv4", "_automation_generation": 4,
+            "mode": "reference", "family": "ipv4", "_automation_generation": 4,
         }, scheduled=True)
         self.assertFalse(ok)
         self.assertIn("已停止", message)
         self.assertEqual(state.status, "idle")
         self.assertIsNone(state.worker)
 
-    def test_ui_contract_defaults_to_direct_ip_hunting_and_copy_ip(self) -> None:
+    def test_ui_contract_requires_full_node_and_keeps_copy_ip_simple(self) -> None:
         html = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
         script = (ROOT / "web" / "app.js").read_text(encoding="utf-8")
         self.assertIn('name="family" value="ipv4" checked', html)
         self.assertIn('name="mode" value="reference" checked', html)
         self.assertIn('name="useTls" value="true" checked', html)
-        self.assertIn('id="argoValidationPanel" class="custom-source" hidden', html)
-        self.assertIn('return argoValidationEnabled.checked ? "argo" : "direct";', script)
+        self.assertIn('id="nodeLink"', html)
+        self.assertIn('V2rayNG 节点（必填）', html)
+        self.assertIn('purpose: "argo"', script)
+        self.assertIn('node_link: rawNodeLink', script)
+        self.assertNotIn('argoValidationEnabled', script)
         self.assertIn("data-winner-ip", script)
         self.assertIn("解析到我的域名（DNS-only）", script)
         self.assertIn("revealDnsSettings(target)", script)

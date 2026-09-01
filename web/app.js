@@ -24,18 +24,14 @@ const ipInput = $("#ipInput");
 const ipFile = $("#ipFile");
 const ipSourceStatus = $("#ipSourceStatus");
 const poolCount = $("#poolCount");
-const targetHost = $("#targetHost");
-const argoValidationEnabled = $("#argoValidationEnabled");
-const argoValidationPanel = $("#argoValidationPanel");
-const nodePort = $("#nodePort");
-const wsPath = $("#wsPath");
+const nodeLink = $("#nodeLink");
+const nodeStatus = $("#nodeStatus");
 const targetMbps = $("#targetMbps");
 const automationEnabled = $("#automationEnabled");
 const automationInterval = $("#automationInterval");
 const automationStatus = $("#automationStatus");
 const automationForecast = $("#automationForecast");
 const startButtonLabel = $("#startButtonLabel");
-const metricIdentityValue = $("#metricIdentityValue");
 const historyRows = $("#historyRows");
 const dnsSyncEnabled = $("#dnsSyncEnabled");
 const dnsSyncPanel = $("#dnsSyncPanel");
@@ -87,10 +83,6 @@ function modeLabel(mode) {
   return ({ reference: "快速优选", asia: "亚洲狩猎", max: "最大带宽", balanced: "均衡模式" })[mode] || "快速优选";
 }
 
-function currentPurpose() {
-  return argoValidationEnabled.checked ? "argo" : "direct";
-}
-
 function sourceIsCustom() {
   return currentValue("ipSource") === "custom";
 }
@@ -98,13 +90,6 @@ function sourceIsCustom() {
 function setCustomStatus(message, kind = "") {
   ipSourceStatus.textContent = message;
   ipSourceStatus.className = `source-status ${kind}`.trim();
-}
-
-function updateArgoValidation() {
-  const enabled = argoValidationEnabled.checked;
-  argoValidationPanel.hidden = !enabled;
-  targetHost.required = enabled;
-  metricIdentityValue.textContent = enabled ? "动态测速端点 + 我的 Argo 域名" : "在线动态测速端点";
 }
 
 function updateSourcePanel() {
@@ -266,10 +251,10 @@ function renderResult(result) {
   if (!families.length) return;
   resultSection.hidden = false;
   const argoVerified = result.purpose === "argo";
-  resultKicker.textContent = argoVerified ? "CF IP RESULT · ARGO VERIFIED" : "CLOUDFLARE IP RESULT";
+  resultKicker.textContent = argoVerified ? "CF IP RESULT · XRAY VERIFIED" : "CLOUDFLARE IP RESULT";
   resultTitle.textContent = "首个达到目标带宽的 IP";
   resultDescription.textContent = argoVerified
-    ? "候选已通过你提供的 Argo 域名兼容复核。仍只替换 address / server；节点原端口、SNI、Host 与 Path 保持不变。"
+    ? "候选已用完整节点配置通过 Xray / V2rayNG 同口径延迟测试。只替换 address / server；其他参数保持不变。"
     : "复制 IP 后只替换节点 address / server；节点原端口、SNI、Host、传输协议与 WS Path 保持不变。";
   if (!families.some((item) => item.family === activeFamily)) activeFamily = families[0].family;
   familyTabs.innerHTML = "";
@@ -291,16 +276,16 @@ function renderResult(result) {
   const target = Number(result.target_mbps || 100);
   const meetsTarget = Number(winner.round_floor_mbps || 0) >= target;
   const peakKbps = Number(winner.peak_kbps || Math.round(Number(winner.avg_complete_mbps || 0) * 128));
-  const tcpLatency = Number(winner.latency_ms || winner.median_ttfb_ms || 0);
+  const nodeDelay = Number(winner.node_delay_ms || 0);
   winnerCard.innerHTML = `
     <div class="winner-domain"><small>WINNER · ${escapeHtml(activeFamily)} · 第 ${Number(winner.scan_round || 1)} 轮</small><h3>${escapeHtml(winner.ip)}</h3><p>${escapeHtml(winner.data_center || winner.loc || winner.pop || "数据中心未知")} · ${result.use_tls === false ? "非 TLS 80" : "TLS 443"}</p><div class="winner-actions"><button type="button" class="mini-button primary-copy" data-winner-ip>复制 IP</button><button type="button" class="mini-button" data-winner-dns>解析到我的域名（DNS-only）</button></div></div>
     <div class="winner-stat"><small>实测带宽</small><strong>${formatMbps(winner.avg_complete_mbps)}</strong><em>目标 ${target} Mbps</em></div>
     <div class="winner-stat"><small>完整一秒峰值</small><strong>${peakKbps.toFixed(0)} kB/s</strong><em>末尾不足一秒不计</em></div>
-    <div class="winner-stat"><small>TCP 延迟</small><strong>${tcpLatency.toFixed(0)} ms</strong><em>${meetsTarget ? "已达标" : "未达标"}</em></div>`;
+    <div class="winner-stat"><small>V2rayNG 同口径延迟</small><strong>${nodeDelay > 0 ? `${nodeDelay.toFixed(0)} ms` : "未通过"}</strong><em>${meetsTarget ? "完整节点已连通" : "未达标"}</em></div>`;
   resultRows.innerHTML = rows.map((row, index) => {
     const rowMeetsTarget = Number(row.round_floor_mbps || 0) >= target;
     const rowPeak = Number(row.peak_kbps || Math.round(Number(row.avg_complete_mbps || 0) * 128));
-    const rowLatency = Number(row.latency_ms || row.median_ttfb_ms || 0);
+    const rowLatency = Number(row.node_delay_ms || 0);
     return `<tr><td><div class="rank-domain"><span class="rank-number">${index + 1}</span><div><strong>${escapeHtml(row.ip)}</strong><small>${escapeHtml(row.family)} · ${rowMeetsTarget ? "已达标" : "未达标"}</small><div class="row-actions"><button type="button" class="copy-button" data-copy-ip="${escapeHtml(row.ip)}">复制 IP</button></div></div></div></td>
       <td class="speed-cell"><strong>${formatMbps(row.avg_complete_mbps)}</strong><small>目标 ${target} Mbps</small></td><td class="speed-cell"><strong>${rowPeak.toFixed(0)} kB/s</strong><small>完整 1 秒窗口</small></td>
       <td><span class="quality-pill">${rowLatency.toFixed(0)} ms</span></td><td>第 ${Number(row.scan_round || 1)} 轮</td><td><span class="pop-pill">${escapeHtml(row.pop || "UNKNOWN")}</span><br><small>${escapeHtml(row.data_center || row.loc || "")}</small></td><td class="address-cell">${escapeHtml((row.source_tags || []).join(" / ") || "在线维护 IP 池")}</td></tr>`;
@@ -448,7 +433,9 @@ subscriptionUrl.addEventListener("input", () => {
 form.querySelectorAll("input[name=ipSource]").forEach((input) => input.addEventListener("change", updateSourcePanel));
 form.querySelectorAll("input[name=mode]").forEach((input) => input.addEventListener("change", () => { updatePoolHint(window.rrConfig || {}); updateAutomationChoice(); }));
 form.querySelectorAll("input[name=family]").forEach((input) => input.addEventListener("change", updateAutomationChoice));
-argoValidationEnabled.addEventListener("change", updateArgoValidation);
+nodeLink.addEventListener("input", () => {
+  nodeStatus.textContent = "节点内容已改变；开始时会在本机解析，并用完整配置做 Xray 出站测试。";
+});
 dnsSyncEnabled.addEventListener("change", updateDnsSync);
 automationEnabled.addEventListener("change", updateAutomationChoice);
 automationInterval.addEventListener("change", () => {
@@ -479,15 +466,18 @@ form.addEventListener("submit", async (event) => {
     showToast(`目标带宽必须在 ${minTarget}–${maxTarget} Mbps 之间`);
     return;
   }
-  const argo = currentPurpose() === "argo";
+  const rawNodeLink = nodeLink.value.trim();
+  if (!/^(vmess|vless):\/\//i.test(rawNodeLink)) {
+    showToast("请粘贴完整的 vmess:// 或 vless:// Argo 节点链接");
+    nodeLink.focus();
+    return;
+  }
   const payload = {
     mode: currentValue("mode"),
     family: currentValue("family"),
     operator: currentValue("operator"),
-    purpose: argo ? "argo" : "direct",
-    target_host: argo ? targetHost.value.trim() : "",
-    node_port: argo ? Number.parseInt(nodePort.value, 10) : 443,
-    ws_path: argo ? wsPath.value.trim() : "",
+    purpose: "argo",
+    node_link: rawNodeLink,
     target_mbps: parsedTarget,
     use_tls: currentValue("useTls") !== "false",
     source: sourceIsCustom() ? "custom" : "dns",
@@ -517,6 +507,10 @@ form.addEventListener("submit", async (event) => {
   }
   try {
     const result = await request(automated ? "/api/automation/start" : "/api/start", payload);
+    nodeLink.value = "";
+    nodeStatus.textContent = automated
+      ? "完整节点已交给本机定时任务内存；停止任务或关闭程序后会清除。"
+      : "完整节点已交给本次本机测试内存；关闭程序后会清除。";
     showToast(result.message || (automated ? "定时自动优选已开启" : "优选已开始"));
     ensurePolling();
     await poll();
@@ -540,7 +534,6 @@ stopButton.addEventListener("click", async () => {
     const config = await (await fetch("/api/config", { cache: "no-store" })).json();
     window.rrConfig = config;
     requestToken = config.request_token || "";
-    nodePort.value = String(config.default_node_port || 443);
     targetMbps.min = String(config.target_mbps?.min || 1);
     targetMbps.max = String(config.target_mbps?.max || 10000);
     targetMbps.value = String(config.target_mbps?.default || 100);
@@ -551,7 +544,6 @@ stopButton.addEventListener("click", async () => {
     if (dnsRecordName.value || dnsZoneId.value) dnsSyncEnabled.checked = true;
     $("#versionLabel").textContent = `Desktop ${config.version || ""}`;
     updatePoolHint(config);
-    updateArgoValidation();
     updateSourcePanel();
     updateDnsSync();
     updateAutomationChoice();

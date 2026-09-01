@@ -2,9 +2,9 @@
 
 **Cloudflare Preferred-IP Selector · Desktop**
 
-RR Edge Hunter runs locally against the current computer and network egress. Each round generates 100 addresses from an online maintained pool, checks every address three times with 50-way concurrency, keeps the 10 lowest-latency candidates, and tests them one by one with up to five seconds of real download traffic. Only complete one-second windows contribute to peak throughput. The first IP that reaches the requested bandwidth is returned; otherwise a fresh round begins automatically.
+RR Edge Hunter runs locally against the current computer and network egress. First paste an existing VMess/VLESS WebSocket-over-TLS Argo node that works in V2rayNG. Each round generates 100 addresses from an online maintained pool, checks every address three times with 50-way concurrency, keeps the 10 lowest-latency candidates, and tests them one by one with up to five seconds of real download traffic.
 
-The output is a bare IPv4 or IPv6 address. Put it only in the VMess/VLESS node's `address` or `server` field. Keep the original port, UUID, protocol, TLS SNI, HTTP Host, and WebSocket Path unchanged.
+After the bandwidth target is met, the app changes only `address/server` in the full Xray outbound, preserves its port, UUID, protocol, TLS SNI, HTTP Host, WS Path, and other fields, then requests V2rayNG's default delay URL, `https://www.gstatic.com/generate_204`, through that node. Only a candidate that passes this complete proxy test is displayed as a bare IP.
 
 ## One-click defaults
 
@@ -16,17 +16,18 @@ The output is a bare IPv4 or IPv6 address. Put it only in the VMess/VLESS node's
 | Transport | TLS 443 with strict certificates; optional plain HTTP 80 |
 | Speed target | Dynamically supplied, with cached/official fallback |
 | Candidate source | Public `baipiao.eu.org` maintained pool plus optional safe imports |
-| Output | Replace node `address/server` only |
+| Node gate | Bundled official Xray-core must reach V2rayNG's default `generate_204` URL through the full node |
+| Output | Only an IP that passes the V2rayNG-equivalent node-delay test; replace `address/server` only |
 
 The UI exposes one understandable flow instead of Balanced, Asia Hunt, and Maximum Bandwidth choices. A failed round is followed by another until a result is found or the user stops it, so there is no honest fixed total-traffic ceiling.
 
 ## Portable Windows build (the only release)
 
-[Download the latest Windows x64 portable ZIP](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip), extract it, open the `CF-IP-Optimizer` directory, and run `CF-IP-Optimizer.exe`. The runtime is bundled; Python and an installer are not required. Keep the executable next to its `_internal` directory.
+[Download the latest Windows x64 portable ZIP](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip), extract it, open the `CF-IP-Optimizer` directory, and run `CF-IP-Optimizer.exe`. Python and a pinned official Xray-core are bundled; no installer is required. Keep the executable next to its `_internal` and `xray` directories.
 
 ### Run from source
 
-Python 3.11 or newer is required; no third-party Python package is needed.
+Python 3.11 or newer is required; no third-party Python package is needed. The full-node gate also requires official Xray-core v26.7.28 at `runtime/xray.exe`, or a path supplied in `RR_EDGE_HUNTER_XRAY`.
 
 - Windows: `start-windows.bat`
 - macOS/Linux: `./start-unix.sh`
@@ -42,10 +43,10 @@ The UI binds to `127.0.0.1` only and does not upload measurement history.
 4. Sort by average TCP latency and retain the best 10.
 5. Pin the dynamically supplied speed host to each candidate in latency order. TLS retains platform certificate, SNI, Host, and actual-peer validation; non-TLS uses port 80.
 6. Download for at most five seconds per candidate. Peak kB/s is calculated only from complete one-second windows; the final partial window is ignored.
-7. Return the first candidate whose peak reaches `target Mbps × 128 kB/s`. Optional Argo validation is an additional gate.
-8. Start a fresh round when none of the 10 candidates reaches the target. Copy and Cloudflare A/AAAA DNS-only synchronization are enabled only for a verified result.
+7. After a candidate reaches `target Mbps × 128 kB/s`, change only `address/server` in its complete Xray node configuration, launch the local Xray outbound, and request V2rayNG's default `generate_204` delay URL through it.
+8. Continue when the full proxy connection fails, and start a fresh round when necessary. Copy and Cloudflare A/AAAA DNS-only synchronization are enabled only for a result that passes both gates.
 
-The default workflow measures the current client-to-Cloudflare ingress path. It needs neither a VPS origin IP nor an Argo hostname.
+The workflow does not test the VPS origin IP, but it requires an existing node so the candidate is proven with the same protocol, credentials, port, TLS, and transport settings V2rayNG will use.
 
 ## Custom candidate pools
 
@@ -53,9 +54,9 @@ Long paste, local TXT/CSV/TSV/JSON/Base64 files, bounded CIDR sampling, IPv4/IPv
 
 The default maintained endpoints are the public interfaces used by [badafans/better-cloudflare-ip](https://github.com/badafans/better-cloudflare-ip). This project independently implements publicly described and observable behavior. The upstream repository currently declares no open-source license, so its source code is neither copied nor bundled here.
 
-## Optional advanced Argo compatibility check
+## V2rayNG node-usability gate
 
-Normal scanning needs no hostname. Enable this check only to validate the winning route against your own node hostname, TLS port, and optional WebSocket Path. The candidate must then pass certificate, SNI, Host, actual-peer, and optional WebSocket `101` checks. The output remains a bare IP and all other node fields stay unchanged.
+Argo verification is part of the main flow. Paste a complete `vmess://` or `vless://` share link; WebSocket + TLS nodes on Cloudflare HTTPS ports `443/2053/2083/2087/2096/8443` are supported. The credential-bearing configuration remains only in process memory and never enters settings, history, logs, exports, or error text. It is sent directly to the bundled official Xray-core over standard input, with only the candidate address changed. The app then reaches `https://www.gstatic.com/generate_204` through a local SOCKS inbound and accepts HTTP 200/204. This verifies a real proxy connection rather than only ICMP, TCP, TLS, or WebSocket reachability.
 
 ## Optional Cloudflare DNS synchronization
 
@@ -76,10 +77,9 @@ The desktop UI can rerun every 5–1,440 minutes. The first run starts immediate
 ## CLI examples
 
 ```bash
-python rr_optimizer.py run --purpose direct --family ipv4 --mode reference --target-mbps 100
-python rr_optimizer.py run --purpose direct --family ipv4 --mode reference --ips my-ip-list.txt --csv result.csv
-python rr_optimizer.py run --purpose direct --family ipv4 --mode reference --target-mbps 100 --no-tls
-python rr_optimizer.py run --purpose argo --target-host argo.example.com --node-port 8443 --ws-path /vless --family ipv4 --mode reference
+python rr_optimizer.py run --purpose argo --node-link-file my-node.txt --family ipv4 --mode reference --target-mbps 100
+python rr_optimizer.py run --purpose argo --node-link-file my-node.txt --family ipv4 --mode reference --ips my-ip-list.txt --csv result.csv
+python rr_optimizer.py run --purpose argo --node-link-file my-node.txt --family ipv4 --mode reference --target-mbps 100 --no-tls
 ```
 
 ## Security and privacy
@@ -91,7 +91,7 @@ python rr_optimizer.py run --purpose argo --target-host argo.example.com --node-
 - Cloudflare API tokens never enter logs, history, or exports.
 - The project does not provide arbitrary host/route changes, port scanning, vulnerability testing, stress testing, or access-control bypass.
 
-See [SECURITY.md](SECURITY.md) and [NOTICE.md](NOTICE.md).
+See [SECURITY.md](SECURITY.md), [NOTICE.md](NOTICE.md), and [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Development and release
 

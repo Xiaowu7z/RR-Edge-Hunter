@@ -618,12 +618,13 @@ def run_reference_family(
                 continue
             route: ProbeResult | None = None
             if compatibility_fn is not None and compatibility_host:
-                on_stage("Argo 域名兼容复核", 0, 1, rtt.candidate.ip)
+                on_stage("V2rayNG 同口径节点复核", 0, 1, rtt.candidate.ip)
                 route = compatibility_fn(rtt.candidate.ip, 7, cancel_event)
-                on_stage("Argo 域名兼容复核", 1, 1, rtt.candidate.ip)
+                on_stage("V2rayNG 同口径节点复核", 1, 1, rtt.candidate.ip)
                 if not (route.ok and route.cert_verified and route.target_matches_remote):
-                    log(f"{rtt.candidate.ip} 达到带宽，但未通过 Argo 兼容复核，继续下一个")
+                    log(f"{rtt.candidate.ip} 达到带宽，但完整节点在 Xray 中未连通，继续下一个")
                     continue
+                log(f"{rtt.candidate.ip} 完整节点通过 V2rayNG 同口径测试：{route.ttfb_ms:.0f} ms")
             if _network_changed(family, initial_fingerprint, network_fingerprint_fn):
                 raise ReferenceNetworkChanged("测试期间网络出口发生变化")
             real_mbps = result.peak_kbps / 128.0
@@ -668,6 +669,7 @@ def run_reference_family(
                 data_center=location,
                 scan_round=round_number,
                 use_tls=use_tls,
+                node_delay_ms=route.ttfb_ms if route is not None else -1.0,
             )
             log(f"{family} 已找到首个达标 IP：{metric.ip}")
             return FamilyRunResult(

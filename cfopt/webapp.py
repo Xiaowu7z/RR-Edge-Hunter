@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import csv
+import functools
 import io
 import ipaddress
 import json
@@ -29,6 +30,7 @@ from .cloudflare_dns import (
 from .history import load_history, save_history
 from .ip_sources import IpSourceError, MAX_IPS, MAX_SOURCE_BYTES, fetch_ip_subscription, normalize_ip_values, parse_ip_source
 from .models import MODES, OptimizerResult, SPEED_HOST
+from .node_template import NodeProfile, parse_node_profile
 from .pipeline import (
     MAX_CANDIDATES_PER_FAMILY,
     MAX_TARGET_MBPS,
@@ -45,6 +47,7 @@ from .pipeline import (
 from .hostnames import HostnameError, normalize_hostname
 from .resources import package_root
 from .version import VERSION
+from .xray_node import XrayNodeError, validate_xray_runtime, verify_node_candidate
 
 
 WEB_DIR = package_root() / "web"
@@ -175,7 +178,7 @@ class RuntimeState:
             "mode", "family", "operator", "target_host", "source", "source_ip_count",
             "automation_enabled", "automation_interval_minutes", "traffic_upper_bound_mb",
             "purpose", "node_port", "ws_path",
-            "target_mbps", "use_tls",
+            "target_mbps", "use_tls", "node_protocol",
         }
         return {key: value for key, value in config.items() if key in visible}
 
@@ -221,6 +224,19 @@ class RuntimeState:
                 del self.logs[:-400]
 
     def start(self, config: dict[str, Any], *, scheduled: bool = False) -> tuple[bool, str]:
+        prepared = dict(config)
+        node_profile = prepared.get("_node_profile")
+        if isinstance(node_profile, NodeProfile):
+            try:
+                prepared["_xray_executable"] = str(
+                    validate_xray_runtime(
+                        prepared.get("_xray_executable"),
+                        profile=node_profile,
+                    )
+                )
+            except XrayNodeError as exc:
+                return False, f"无法开始：{exc}"
+        config = prepared
         with self.lock:
             if scheduled and (
                 not self.automation_enabled
@@ -261,6 +277,16 @@ class RuntimeState:
                     self.log(f"定时任务已安全刷新 IP 订阅：{len(refreshed.ips)} 个地址")
                 except IpSourceError as exc:
                     self.log(f"IP 订阅刷新失败，继续使用上次已载入快照：{exc}")
+            node_profile = run_config.get("_node_profile")
+            compatibility_fn = (
+                functools.partial(
+                    verify_node_candidate,
+                    profile=node_profile,
+                    xray_executable=run_config.get("_xray_executable"),
+                )
+                if isinstance(node_profile, NodeProfile)
+                else None
+            )
             result = run_optimizer(
                 mode=str(run_config.get("mode", "reference")),
                 family=str(run_config.get("family", "ipv4")),
@@ -276,7 +302,11 @@ class RuntimeState:
                 cancel_event=self.cancel_event,
                 on_stage=self.on_stage,
                 log=self.log,
+                compatibility_fn=compatibility_fn,
             )
+            if isinstance(node_profile, NodeProfile):
+                result.node_sni = node_profile.route.sni
+                result.node_host = node_profile.route.host_header
             with self.lock:
                 self.result = result
                 self.status = "cancelled" if result.cancelled else "completed"
@@ -302,6 +332,19 @@ class RuntimeState:
     def start_automation(self, config: dict[str, Any], interval_minutes: int) -> tuple[bool, str]:
         if not MIN_AUTOMATION_INTERVAL_MINUTES <= interval_minutes <= MAX_AUTOMATION_INTERVAL_MINUTES:
             return False, f"自动运行间隔必须在 {MIN_AUTOMATION_INTERVAL_MINUTES}–{MAX_AUTOMATION_INTERVAL_MINUTES} 分钟之间"
+        prepared = dict(config)
+        node_profile = prepared.get("_node_profile")
+        if isinstance(node_profile, NodeProfile):
+            try:
+                prepared["_xray_executable"] = str(
+                    validate_xray_runtime(
+                        prepared.get("_xray_executable"),
+                        profile=node_profile,
+                    )
+                )
+            except XrayNodeError as exc:
+                return False, f"无法开启定时优选：{exc}"
+        config = prepared
         with self.lock:
             if self.automation_enabled:
                 return False, "定时自动优选已在运行"
@@ -458,12 +501,14 @@ class RuntimeState:
 def _csv_bytes(result: OptimizerResult) -> bytes:
     argo = result.purpose == PURPOSE_ARGO
     node_output = result.purpose in {PURPOSE_DIRECT, PURPOSE_ARGO}
+    node_sni = result.node_sni or result.target_host
+    node_host = result.node_host or node_sni
     output = io.StringIO(newline="")
     writer = csv.writer(output)
     writer.writerow([
         "family", "rank", "ip", "server", "target_mbps", "meets_target", "port", "sni", "host", "ws_path",
         "peak_kbps", "tcp_latency_ms", "scan_round", "data_center", "transport", "measurement_host", "measurement_port",
-        "round_floor_mbps", "avg_complete_mbps", "min_complete_mbps", "success_rate_pct", "variation_pct", "median_ttfb_ms", "pop", "loc", "rounds_tested", "source_tags",
+        "round_floor_mbps", "avg_complete_mbps", "min_complete_mbps", "success_rate_pct", "variation_pct", "median_ttfb_ms", "v2rayng_delay_ms", "pop", "loc", "rounds_tested", "source_tags",
     ])
     for family in result.families:
         rows = family.asia_ranked if result.mode == "asia" else family.ranked
@@ -471,12 +516,12 @@ def _csv_bytes(result: OptimizerResult) -> bytes:
             writer.writerow([
                 family.family, index, item.ip, item.ip if node_output else "", result.target_mbps,
                 "yes" if item.round_floor_mbps >= result.target_mbps else "no", result.node_port if argo else "",
-                result.target_host if argo else "", result.target_host if argo else "", result.ws_path if argo else "",
+                node_sni if argo else "", node_host if argo else "", result.ws_path if argo else "",
                 item.peak_kbps, item.latency_ms, item.scan_round, item.data_center,
                 "TLS" if item.use_tls else "plain HTTP", result.measurement_host, result.measurement_port,
                 f"{item.round_floor_mbps:.3f}", f"{item.avg_complete_mbps:.3f}",
                 f"{item.min_complete_mbps:.3f}", f"{item.success_rate_pct:.1f}", f"{item.variation_pct:.1f}",
-                f"{item.median_ttfb_ms:.1f}", item.pop, item.loc, item.rounds_tested, " | ".join(item.source_tags),
+                f"{item.median_ttfb_ms:.1f}", f"{item.node_delay_ms:.1f}", item.pop, item.loc, item.rounds_tested, " | ".join(item.source_tags),
             ])
     return output.getvalue().encode("utf-8-sig")
 
@@ -569,34 +614,36 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
             purpose = str(body.get("purpose", PURPOSE_DIRECT))
             if purpose not in {PURPOSE_DIRECT, PURPOSE_ARGO, PURPOSE_DNS}:
                 raise IpSourceError("用途参数无效")
+            node_profile: NodeProfile | None = None
             if purpose == PURPOSE_DIRECT:
                 target_host = SPEED_HOST
+            elif purpose == PURPOSE_ARGO:
+                raw_node_link = str(body.get("node_link", "")).strip()
+                if not raw_node_link:
+                    raise IpSourceError("请粘贴一个当前在 V2rayNG 可用的 VMess/VLESS Argo 节点")
+                if len(raw_node_link.encode("utf-8")) > 32 * 1024:
+                    raise IpSourceError("节点分享链接过长")
+                try:
+                    node_profile = parse_node_profile(raw_node_link)
+                except ValueError as exc:
+                    raise IpSourceError(str(exc)) from exc
+                target_host = node_profile.route.sni
             else:
-                raw_target = str(body.get("target_host", "" if purpose == PURPOSE_ARGO else SPEED_HOST)).strip()[:255]
+                raw_target = str(body.get("target_host", SPEED_HOST)).strip()[:255]
                 if any(marker in raw_target for marker in ("://", "/", "?", "#", "@")) or ":" in raw_target:
                     raise IpSourceError("请只填写域名，不要填写 IP、URL、端口或路径")
                 try:
                     target_host = normalize_hostname(raw_target)
                 except HostnameError as exc:
-                    label = "Argo 节点域名" if purpose == PURPOSE_ARGO else "测试主机"
-                    raise IpSourceError(f"{label}无效：{exc}") from exc
+                    raise IpSourceError(f"测试主机无效：{exc}") from exc
             if purpose == PURPOSE_ARGO:
-                raw_port = body.get("node_port", 443)
-                if isinstance(raw_port, bool):
-                    raise IpSourceError("节点端口无效")
-                try:
-                    node_port = int(raw_port)
-                except (TypeError, ValueError) as exc:
-                    raise IpSourceError("节点端口无效") from exc
-                if node_port not in SUPPORTED_TLS_PORTS:
-                    raise IpSourceError("节点端口仅支持 443、2053、2083、2087、2096、8443")
+                assert node_profile is not None
+                node_port = node_profile.route.port
             else:
                 node_port = 443
             if purpose == PURPOSE_ARGO:
-                try:
-                    ws_path = normalize_ws_path(body.get("ws_path", ""))
-                except ValueError as exc:
-                    raise IpSourceError(str(exc)) from exc
+                assert node_profile is not None
+                ws_path = node_profile.route.ws_path
             else:
                 ws_path = ""
             raw_target_mbps = body.get("target_mbps", 100)
@@ -609,7 +656,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
             if not MIN_TARGET_MBPS <= target_mbps <= MAX_TARGET_MBPS:
                 raise IpSourceError(f"目标带宽必须在 {MIN_TARGET_MBPS}–{MAX_TARGET_MBPS} Mbps 之间")
             source = "custom" if body.get("source") == "custom" else "dns"
-            if mode not in MODES or family not in {"ipv4", "ipv6", "dual"}:
+            if mode != "reference" or family not in {"ipv4", "ipv6", "dual"}:
                 raise IpSourceError("参数无效")
             raw_use_tls = body.get("use_tls", True)
             if not isinstance(raw_use_tls, bool):
@@ -634,6 +681,9 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 "use_tls": raw_use_tls,
                 "traffic_upper_bound_mb": _traffic_upper_bound_mb(mode, family, target_mbps),
             }
+            if node_profile is not None:
+                config["_node_profile"] = node_profile
+                config["node_protocol"] = node_profile.route.protocol
             if source == "custom":
                 values = body.get("ips")
                 if not isinstance(values, list):
@@ -684,7 +734,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                 self._json({
                     "version": VERSION,
                     "request_token": request_token,
-                    "default_purpose": PURPOSE_DIRECT,
+                    "default_purpose": PURPOSE_ARGO,
                     "default_target_host": SPEED_HOST,
                     "diagnostic_default_target_host": SPEED_HOST,
                     "default_node_port": 443,
@@ -714,6 +764,7 @@ def make_handler(state: RuntimeState, request_token: str, allowed_hosts: set[str
                             "early_stop": mode.early_stop,
                         }
                         for name, mode in MODES.items()
+                        if name == "reference"
                     },
                 })
                 return

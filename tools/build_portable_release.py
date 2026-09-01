@@ -28,7 +28,6 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 APP_NAME = "CF-IP-Optimizer"
 WINDOWS_TARGET = "Windows-x64"
-LINUX_TARGET = "Linux-x64"
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 
 
@@ -66,9 +65,9 @@ def _valid_version(value: str) -> str:
 def _host_target() -> str:
     if sys.platform == "win32":
         return WINDOWS_TARGET
-    if sys.platform.startswith("linux"):
-        return LINUX_TARGET
-    raise RuntimeError(f"当前平台暂不支持 PyInstaller 便携包：{platform.system() or sys.platform}")
+    raise RuntimeError(
+        f"本仓库只发布含内置 Xray 的 Windows x64 便携包；当前平台为 {platform.system() or sys.platform}"
+    )
 
 
 def _safe_relative(name: str) -> PurePosixPath:
@@ -159,7 +158,7 @@ def _run_pyinstaller(source_root: Path, staging_root: Path) -> Path:
 
 
 def _write_user_guide(bundle: Path, target: str, version: str) -> None:
-    executable = f"{APP_NAME}{'.exe' if target == WINDOWS_TARGET else ''}"
+    executable = f"{APP_NAME}.exe"
     guide = (
         "CF 优选IP（RR Edge Hunter）便携版\n"
         f"版本：{version}\n\n"
@@ -167,17 +166,31 @@ def _write_user_guide(bundle: Path, target: str, version: str) -> None:
         f"1. 保持本文件与 {executable} 及 _internal 文件夹在同一目录。\n"
         f"2. 双击 {executable}。\n"
         "3. 程序会自动在默认浏览器打开本机界面；测速记录只保存在本机。\n\n"
-        "此版本已内置运行环境，无需安装 Python。\n"
-        "请不要单独移动或删除 _internal 文件夹。\n"
+        "此版本已内置 Python 与 Xray 运行环境，无需安装。\n"
+        "请不要单独移动或删除 _internal、xray 文件夹。\n"
     )
     (bundle / "使用说明.txt").write_text(guide, encoding="utf-8")
+
+
+def _install_xray_runtime(bundle: Path, executable: Path, license_file: Path) -> str:
+    if not executable.is_file() or executable.name.lower() != "xray.exe":
+        raise RuntimeError("便携版缺少经过校验的 xray.exe")
+    if not license_file.is_file():
+        raise RuntimeError("便携版缺少 Xray-core LICENSE")
+    runtime = bundle / "xray"
+    runtime.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(executable, runtime / "xray.exe")
+    shutil.copy2(license_file, runtime / "Xray-core-LICENSE.txt")
+    return _sha256(runtime / "xray.exe")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build a self-contained RR Edge Hunter portable desktop ZIP")
     parser.add_argument("--version", required=True, help="Release version with or without the v prefix")
-    parser.add_argument("--target", choices=("auto", WINDOWS_TARGET, LINUX_TARGET), default="auto")
+    parser.add_argument("--target", choices=("auto", WINDOWS_TARGET), default="auto")
     parser.add_argument("--output-dir", type=Path, default=ROOT / "dist")
+    parser.add_argument("--xray-exe", type=Path, help="Pinned official Xray Windows executable")
+    parser.add_argument("--xray-license", type=Path, help="Xray-core license file from the same archive")
     args = parser.parse_args()
 
     try:
@@ -188,6 +201,8 @@ def main() -> int:
     target = host_target if args.target == "auto" else args.target
     if target != host_target:
         raise SystemExit(f"{target} 只能在对应平台构建；当前为 {host_target}")
+    if args.xray_exe is None or args.xray_license is None:
+        raise SystemExit("Windows 便携版必须提供经过校验的 --xray-exe 与 --xray-license")
     try:
         import PyInstaller  # noqa: F401
     except ModuleNotFoundError as exc:
@@ -204,10 +219,11 @@ def main() -> int:
         _export_head(source_root)
         (source_root / "VERSION").write_text(f"{version}\n", encoding="utf-8")
         bundle = _run_pyinstaller(source_root, staging_root)
+        xray_sha256 = _install_xray_runtime(bundle, args.xray_exe.resolve(), args.xray_license.resolve())
         _write_user_guide(bundle, target, version)
         _archive_directory(bundle, APP_NAME, archive)
 
-    executable = f"{APP_NAME}{'.exe' if target == WINDOWS_TARGET else ''}"
+    executable = f"{APP_NAME}.exe"
     metadata = {
         "archive": archive.name,
         "entrypoint": f"{APP_NAME}/{executable}",
@@ -216,6 +232,8 @@ def main() -> int:
         "sha256": _sha256(archive),
         "source_revision": _git("rev-parse", "HEAD").decode("ascii").strip(),
         "version": version,
+        "xray_sha256": xray_sha256,
+        "xray_version": "v26.7.28" if xray_sha256 else "",
     }
     manifest.write_text(json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     checksum.write_text(f"{metadata['sha256']}  {archive.name}\n", encoding="utf-8")

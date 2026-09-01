@@ -2,9 +2,9 @@
 
 **CF 优选 IP · 电脑端**
 
-RR Edge Hunter 是一款在当前电脑、当前网络出口上运行的 Cloudflare 入口 IP 优选工具。每轮从在线维护网段中随机生成 100 个地址，以 50 并发对每个地址执行三次 RTT + `CF-RAY` 验证，保留延迟最低的 10 个，再逐个做最多 5 秒真实下载。只统计完整的一秒速度窗口，最后不足一秒的数据不计峰值；第一个达到期望带宽的 IP 立即返回，否则自动换一批继续。
+RR Edge Hunter 是一款在当前电脑、当前网络出口上运行的 Cloudflare 入口 IP 优选工具。先粘贴一个当前在 V2rayNG 能用的 VMess/VLESS WebSocket + TLS Argo 节点；每轮从在线维护网段中随机生成 100 个地址，以 50 并发对每个地址执行三次 RTT + `CF-RAY` 验证，保留延迟最低的 10 个，再逐个做最多 5 秒真实下载。只统计完整的一秒速度窗口，最后不足一秒的数据不计峰值。
 
-优选结果是一个裸 IPv4 或 IPv6。把它填入 VMess / VLESS 等节点的 `address` 或 `server` 字段即可；节点原来的端口、UUID、协议、TLS SNI、HTTP Host、WS Path 等参数全部保持不变。
+达到期望带宽后，程序只替换完整 Xray 出站里的 `address/server`，保留原节点的端口、UUID、协议、TLS SNI、HTTP Host、WS Path 等参数，通过该 VMess/VLESS 节点请求 V2rayNG 默认延迟地址 `https://www.gstatic.com/generate_204`。只有完整代理出站成功的候选才会显示为可复制裸 IP。
 
 > 结果只代表本轮电脑、网络出口、运营商和时间。切换宽带、Wi-Fi、VPN、代理或出口后应重新测试。
 
@@ -18,7 +18,8 @@ RR Edge Hunter 是一款在当前电脑、当前网络出口上运行的 Cloudfl
 | 连接方式 | TLS 443（默认、严格证书校验）/ 非 TLS 80 |
 | 测速地址 | 由公开维护接口动态下发；离线时使用缓存/官方备用 |
 | 候选来源 | `baipiao.eu.org` 公开维护池；可叠加用户导入的安全公网 IP |
-| 输出用途 | 只替换节点 `address/server` |
+| 节点门禁 | 内置官方 Xray-core，以完整节点请求 V2rayNG 默认 `generate_204` 地址 |
+| 输出用途 | 只显示 V2rayNG 同口径节点延迟测试成功的 IP；仅替换 `address/server` |
 
 界面只保留这一条可解释的流程，不再让用户在“均衡 / 亚洲狩猎 / 最大带宽”之间猜测。未达到目标会继续测试甚至自动换轮，直到找到结果或用户点击停止，因此实际流量取决于线路情况，不显示虚假的固定总流量上限。
 
@@ -28,11 +29,11 @@ RR Edge Hunter 是一款在当前电脑、当前网络出口上运行的 Cloudfl
 
 [📦 下载最新版 Windows x64 便携包](https://github.com/Xiaowu7z/RR-Edge-Hunter/releases/latest/download/CF-IP-Optimizer-Windows-x64.zip)
 
-解压 ZIP，进入 `CF-IP-Optimizer` 文件夹后双击 `CF-IP-Optimizer.exe`。便携包已内置运行环境，无需安装 Python；请保留 EXE 与 `_internal` 文件夹的相对位置。仓库不再发布安装程序。
+解压 ZIP，进入 `CF-IP-Optimizer` 文件夹后双击 `CF-IP-Optimizer.exe`。便携包已内置 Python 运行环境和固定版本的官方 Xray-core，无需安装；请保留 EXE、`_internal` 与 `xray` 文件夹的相对位置。仓库不再发布安装程序。
 
 ### 源码运行
 
-要求 Python 3.11 或更高版本，不需要第三方 Python 包。
+要求 Python 3.11 或更高版本，不需要第三方 Python 包。完整节点门禁还需要官方 Xray-core v26.7.28：放到 `runtime/xray.exe`，或通过环境变量 `RR_EDGE_HUNTER_XRAY` 指定路径。
 
 - Windows：双击 `start-windows.bat`
 - macOS / Linux：运行 `./start-unix.sh`
@@ -48,10 +49,10 @@ RR Edge Hunter 是一款在当前电脑、当前网络出口上运行的 Cloudfl
 4. 按三次 TCP 延迟平均值升序，只保留前 10 个候选。
 5. 按延迟顺序逐个连接动态测速主机，固定真实 TCP 目标为候选 IP；TLS 模式保留系统证书与 SNI/Host 校验，非 TLS 模式使用 80 端口。
 6. 每个候选最多下载 5 秒，以 32 KiB 读取；每个完整一秒窗口计算一次 kB/s 峰值，最后不足一秒窗口不参与。
-7. 第一个达到 `期望 Mbps × 128 kB/s` 的 IP 成为结果；若启用了 Argo 高级复核，还必须通过原节点域名验证。
-8. 10 个候选均未达到目标时自动进入新一轮。复制 IP 和 Cloudflare A/AAAA DNS-only 同步只对达标结果开放。
+7. 达到 `期望 Mbps × 128 kB/s` 后，只把完整 Xray 节点配置的 `address/server` 改成候选 IP，启动本地 Xray 出站，并经该节点请求 V2rayNG 默认的 `generate_204` 延迟地址。
+8. 完整节点出站失败就继续下一个候选；本轮都失败则自动进入新一轮。复制 IP 和 Cloudflare A/AAAA DNS-only 同步只对同时通过速度与节点门禁的结果开放。
 
-默认流程测量“当前电脑网络到 Cloudflare 入口”的质量，不需要 VPS 源站 IP，也不要求填写 Argo 域名。
+流程不测试 VPS 源站 IP，但必须粘贴用户自己的现有节点，才能以 V2rayNG/Xray 实际使用的协议、凭据、端口、TLS 与传输参数证明候选真的能作为节点地址。
 
 ## 自定义 IP 池
 
@@ -68,11 +69,11 @@ RR Edge Hunter 是一款在当前电脑、当前网络出口上运行的 Cloudfl
 
 默认维护数据来自 [badafans/better-cloudflare-ip](https://github.com/badafans/better-cloudflare-ip) 所使用的公开接口。本项目只复现其公开描述与可观察的测速流程，代码为独立实现；上游仓库当前未声明开源许可证，因此没有复制或内嵌其源代码。
 
-## 高级：Argo 兼容复核
+## V2rayNG 节点可用性门禁
 
-普通优选不需要域名。只有希望确认候选 IP 是否兼容自己的 Argo 节点时，才在高级设置中开启，并填写原节点域名、TLS 端口和可选 WS Path。
+Argo 复核是主流程，不再藏在高级设置。开始测试前粘贴完整 `vmess://` 或 `vless://` 分享链接；当前支持 WebSocket + TLS 节点和 Cloudflare HTTPS 端口 `443/2053/2083/2087/2096/8443`。识别后节点内容只留在当前程序内存，不写入配置、日志、历史、导出或错误文本。
 
-开启后，达标 IP 还必须使用原域名完成证书、SNI、Host 与真实对端校验；填写 Path 时必须通过标准 WebSocket `101` 握手。它只是附加复核，最终仍只复制裸 IP，节点端口、UUID、SNI、Host 与 Path 不会被工具改写。
+门禁把完整 VMess/VLESS 出站配置直接通过标准输入交给内置官方 Xray-core，不在磁盘生成含 UUID 的节点配置文件。程序只替换候选地址，再经本地 SOCKS 入站请求 `https://www.gstatic.com/generate_204`；只有收到有效 HTTP 200/204 才通过。这验证的是真实代理连接，而不是 ICMP Ping、TCP、TLS 或 WebSocket 单层握手。
 
 ## 可选：同步到 Cloudflare DNS
 
@@ -101,17 +102,14 @@ DNS 同步是独立可选输出，不会修改 Argo 域名或节点的端口、U
 ## 命令行
 
 ```bash
-# IPv4、100 Mbps、TLS 443
-python rr_optimizer.py run --purpose direct --family ipv4 --mode reference --target-mbps 100
+# IPv4、100 Mbps、TLS 443；节点链接从 UTF-8 文件读取，避免进入命令历史
+python rr_optimizer.py run --purpose argo --node-link-file my-node.txt --family ipv4 --mode reference --target-mbps 100
 
 # 叠加自己的 IP 名单
-python rr_optimizer.py run --purpose direct --family ipv4 --mode reference --ips my-ip-list.txt --csv result.csv
+python rr_optimizer.py run --purpose argo --node-link-file my-node.txt --family ipv4 --mode reference --ips my-ip-list.txt --csv result.csv
 
 # 非 TLS 80
-python rr_optimizer.py run --purpose direct --family ipv4 --mode reference --target-mbps 100 --no-tls
-
-# 高级 Argo 兼容复核
-python rr_optimizer.py run --purpose argo --target-host argo.example.com --node-port 8443 --ws-path /vless --family ipv4 --mode reference
+python rr_optimizer.py run --purpose argo --node-link-file my-node.txt --family ipv4 --mode reference --target-mbps 100 --no-tls
 ```
 
 ## 安全与隐私
@@ -123,7 +121,7 @@ python rr_optimizer.py run --purpose argo --target-host argo.example.com --node-
 - Cloudflare API Token 不写日志、历史或导出；错误信息会脱敏。
 - 不提供端口扫描、漏洞探测、压力测试、任意 hosts/路由修改或访问控制绕过。
 
-详见 [SECURITY.md](SECURITY.md) 与 [NOTICE.md](NOTICE.md)。
+详见 [SECURITY.md](SECURITY.md)、[NOTICE.md](NOTICE.md) 与 [第三方组件说明](THIRD_PARTY_NOTICES.md)。
 
 ## 开发与验证
 

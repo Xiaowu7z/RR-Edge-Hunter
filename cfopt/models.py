@@ -153,6 +153,7 @@ class IpMetric:
     data_center: str = ""
     scan_round: int = 0
     use_tls: bool = True
+    node_delay_ms: float = -1.0
 
     @property
     def mb_per_sec(self) -> float:
@@ -217,6 +218,8 @@ class OptimizerResult:
     purpose: str = "direct"
     target_mbps: int = 100
     node_port: int = 443
+    node_sni: str = ""
+    node_host: str = ""
     ws_path: str = ""
     measurement_host: str = SPEED_HOST
     measurement_port: int = 443
@@ -240,6 +243,8 @@ class OptimizerResult:
             "purpose": self.purpose,
             "target_mbps": self.target_mbps,
             "node_port": self.node_port,
+            "node_sni": self.node_sni,
+            "node_host": self.node_host,
             "ws_path": self.ws_path,
             "measurement_host": self.measurement_host,
             "measurement_port": self.measurement_port,

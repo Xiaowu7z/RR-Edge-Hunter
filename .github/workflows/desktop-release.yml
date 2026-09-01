@@ -44,12 +44,31 @@ jobs:
           python -m py_compile rr_optimizer.py cfopt/*.py tools/build_release.py tools/build_portable_release.py
           node --check web/app.js
 
+      - name: Fetch pinned official Xray core
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="${RUNNER_TEMP}/Xray-windows-64-v26.7.28.zip"
+          curl --fail --location --retry 3 \
+            https://github.com/XTLS/Xray-core/releases/download/v26.7.28/Xray-windows-64.zip \
+            --output "$ARCHIVE"
+          echo "c7172078fca4711bcd92a4774dcd1822544579c58816197575c47533317fd8d1  $ARCHIVE" | sha256sum --check --strict
+          mkdir -p runtime
+          unzip -p "$ARCHIVE" xray.exe > runtime/xray.exe
+          unzip -p "$ARCHIVE" LICENSE > runtime/Xray-core-LICENSE.txt
+          test -s runtime/xray.exe
+          test -s runtime/Xray-core-LICENSE.txt
+
       - name: Build self-contained Windows application
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --disable-pip-version-check --no-cache-dir "pyinstaller==6.11.1"
-          python tools/build_portable_release.py --version 1.0.0 --target Windows-x64
+          python tools/build_portable_release.py \
+            --version 1.0.0 \
+            --target Windows-x64 \
+            --xray-exe runtime/xray.exe \
+            --xray-license runtime/Xray-core-LICENSE.txt
 
       - name: Smoke-test portable Windows package
         shell: pwsh
@@ -66,6 +85,10 @@ jobs:
           if (-not (Test-Path $portableExe)) {
             throw 'Portable application executable is missing'
           }
+          $xrayExe = Join-Path $source 'xray\xray.exe'
+          if (-not (Test-Path $xrayExe)) { throw 'Bundled Xray core is missing' }
+          $xrayVersion = & $xrayExe version | Out-String
+          if ($LASTEXITCODE -ne 0 -or $xrayVersion -notmatch 'Xray') { throw 'Bundled Xray core smoke test failed' }
           $portableHelp = Start-Process -FilePath $portableExe -ArgumentList '--help' -Wait -PassThru
           if ($portableHelp.ExitCode -ne 0) { throw "Portable application smoke test failed with exit code $($portableHelp.ExitCode)" }
 
@@ -86,12 +109,12 @@ jobs:
           printf '%s\n\n%s\n\n%s\n' \
             "CF 优选IP Windows 正式版 1.0.0" \
             "构建提交：\`$GITHUB_SHA\`" \
-            "仅提供免安装便携版，解压后运行 CF-IP-Optimizer.exe；包含在线维护池、100 IP 三次 RTT 快筛、最低延迟 10 个逐个 5 秒真实下载、TLS/非 TLS、IPv4/IPv6、定时运行，以及达标 IP 同步到 Cloudflare A/AAAA 灰云记录。" \
+            "仅提供免安装便携版，解压后运行 CF-IP-Optimizer.exe；内置官方 Xray-core，候选必须用完整 VMess/VLESS 节点通过 V2rayNG 默认 generate_204 同口径测试；同时包含真实下载测速、IPv4/IPv6、定时运行与 Cloudflare A/AAAA 灰云同步。" \
             > "$NOTES_FILE"
 
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-          fi
+          while IFS= read -r OLD_TAG; do
+            test -z "$OLD_TAG" || gh release delete "$OLD_TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          done < <(gh release list --repo "$GITHUB_REPOSITORY" --limit 100 --json tagName --jq '.[].tagName')
           if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
             git push origin ":refs/tags/$TAG"
           fi
@@ -109,8 +132,6 @@ jobs:
             --notes-file "$NOTES_FILE" \
             --latest
 
-          if gh release view testing --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release delete testing --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
-          elif git ls-remote --exit-code --tags origin refs/tags/testing >/dev/null 2>&1; then
+          if git ls-remote --exit-code --tags origin refs/tags/testing >/dev/null 2>&1; then
             git push origin :refs/tags/testing
           fi
